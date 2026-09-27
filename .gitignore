@@ -1,0 +1,115 @@
+================================
+
+Purview — Git Ignore
+
+================================
+
+---------- Environment / Secrets ----------
+
+.env
+.env.*
+!.env.example
+*.env
+*.secret
+*.secrets
+
+---------- Node / Next.js ----------
+
+node_modules/
+.next/
+out/
+dist/
+build/
+.turbo/
+.vercel/
+
+---------- Logs ----------
+
+.log
+logs/
+npm-debug.log
+yarn-debug.log*
+pnpm-debug.log*
+
+---------- Python ----------
+
+pycache/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+ENV/
+
+---------- Local databases ----------
+
+*.db
+*.sqlite
+*.sqlite3
+
+---------- OS ----------
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+---------- IDE / Editors ----------
+
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+.idea/
+*.swp
+*.swo
+
+---------- Test / Coverage ----------
+
+coverage/
+.nyc_output/
+.pytest_cache/
+.mypy_cache/
+
+---------- Foundry ----------
+
+cache/
+out/
+broadcast/
+deployments/
+
+Keep Foundry configuration/source/tests tracked.
+
+Do NOT place private keys or deployment secrets in tracked files.
+
+---------- Temporary files ----------
+
+tmp/
+temp/
+*.tmp
+*.bak
+*.backup
+
+---------- Generated local artifacts ----------
+
+*.local
+*.local.json
+*.local.yaml
+*.local.yml
+
+---------- Secret / Credential Files ----------
+
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+service-account.json
+
+---------- Local Purview Files ----------
+
+STATUS.local.md
+notes.local.md
