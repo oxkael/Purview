@@ -13,12 +13,13 @@ export const robinhoodMainnet = defineChain({
   },
 })
 
-// Addresses below are transcribed from backend.md. Their presence here is
-// configuration, not proof that the contracts or markets are usable.
+// Address presence is configuration, not proof that contracts or markets are usable.
 export const configuredContracts = {
   usdg: getAddress('0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168'),
   nvda: getAddress('0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC'),
   morphoBlue: getAddress('0x9D53d5E3bd5E8d4Cbfa6DB1ca238AEA02E651010'),
+  morphoBlueBundlesV1: getAddress('0x53A1eB6589861F686af7c531211E35Aefe30210f'),
+  morphoBluePublicAllocator: getAddress('0xCe5c1aFa115fF8b1D6913509bfc79D9AE08CC857'),
   adaptiveCurveIrm: getAddress('0x2BD3d5965B26B51814AC95127B2b80dD6CcC0fa1'),
 } as const
 
@@ -39,6 +40,7 @@ export const serverConfig = {
   host: process.env.HOST ?? '127.0.0.1',
   port: Number(process.env.PORT ?? 3001),
   rpcTimeoutMs: 5_000,
+  zeroXApiKey: process.env.ZEROX_API_KEY?.trim() ?? '',
 }
 
 if (!Number.isInteger(serverConfig.port) || serverConfig.port < 1 || serverConfig.port > 65_535) {

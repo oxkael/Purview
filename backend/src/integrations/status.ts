@@ -2,6 +2,7 @@ import { createPublicClient, http, type Address } from 'viem'
 import { configuredContracts, robinhoodMainnet, serverConfig } from '../config.js'
 import { getLongbowMarketStatus } from './longbow.js'
 import { getLongbowOracleStatus } from './oracle.js'
+import { getBlueBundlesStatus } from './morphoBundles.js'
 
 const client = createPublicClient({
   chain: robinhoodMainnet,
@@ -77,6 +78,7 @@ export async function getIntegrationStatus() {
         probeBytecode(configuredContracts.usdg),
         probeBytecode(configuredContracts.nvda),
         probeBytecode(configuredContracts.morphoBlue),
+        probeBytecode(configuredContracts.morphoBlueBundlesV1),
         probeBytecode(configuredContracts.adaptiveCurveIrm),
       ])
     : []
@@ -97,7 +99,11 @@ export async function getIntegrationStatus() {
         detail: 'RPC chain was not verified.',
       }
 
-  const [usdg, nvda, morphoBlue, adaptiveCurveIrm] = contractProbes
+  const morphoBundles = rpc.status === 'available'
+    ? await getBlueBundlesStatus()
+    : { status: 'not_checked' as const, address: configuredContracts.morphoBlueBundlesV1, detail: 'RPC chain was not verified.' }
+
+  const [usdg, nvda, morphoBlue, morphoBlueBundlesV1, adaptiveCurveIrm] = contractProbes
 
   return {
     checkedAt: new Date().toISOString(),
@@ -107,19 +113,23 @@ export async function getIntegrationStatus() {
       rpc,
     },
     contracts: rpc.status === 'available'
-      ? { usdg, nvda, morphoBlue, adaptiveCurveIrm }
+      ? { usdg, nvda, morphoBlue, morphoBlueBundlesV1, adaptiveCurveIrm }
       : {
           usdg: { status: 'not_checked' as const, address: configuredContracts.usdg, detail: 'RPC chain was not verified.' },
           nvda: { status: 'not_checked' as const, address: configuredContracts.nvda, detail: 'RPC chain was not verified.' },
           morphoBlue: { status: 'not_checked' as const, address: configuredContracts.morphoBlue, detail: 'RPC chain was not verified.' },
+          morphoBlueBundlesV1: { status: 'not_checked' as const, address: configuredContracts.morphoBlueBundlesV1, detail: 'RPC chain was not verified.' },
           adaptiveCurveIrm: { status: 'not_checked' as const, address: configuredContracts.adaptiveCurveIrm, detail: 'RPC chain was not verified.' },
         },
     integrations: {
       zeroX: {
-        status: 'not_checked' as const,
-        detail: 'A live quote and execution-path validation have not been performed.',
+        status: serverConfig.zeroXApiKey ? 'blocked' as const : 'unavailable' as const,
+        detail: serverConfig.zeroXApiKey
+          ? 'API key is configured. Last live NVDA-to-USDG price request was rejected by 0x for legal restrictions; no route or execution is available unless 0x grants tokenized-equity access.'
+          : 'ZEROX_API_KEY is not configured; live token-pair validation is unavailable.',
       },
       longbowMarket,
+      morphoBlueBundlesV1: morphoBundles,
       chainlink: longbowOracle,
       router: {
         status: 'not_checked' as const,

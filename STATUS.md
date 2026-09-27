@@ -90,10 +90,10 @@ Receipt
 3. Backend
 
 - [~] "/api/health" — implemented; runtime response not yet verified
-- [~] "/api/integrations/status" — live endpoint returned chain ID 4663 and bytecode at configured addresses; protocol behavior remains unverified
+- [~] "/api/integrations/status" — live endpoint verifies RPC, configured bytecode, market parameters, oracle diagnostics, and BlueBundlesV1 immutable dependencies; execution remains unverified
 - [x] "/api/portfolio?address=..." — live read verified for the supplied wallet on Robinhood Chain; see portfolio evidence below
-- [ ] "/api/intent"
-- [ ] "/api/plan"
+- [~] "POST /api/intent" — conservative documented-format parser implemented; runtime behavior not yet verified
+- [~] "POST /api/plan" — read-only preflight implemented; live response not yet verified; no numerical plan or execution
 - [ ] "/api/plan/:id/recheck"
 - [ ] "/api/execute"
 - [ ] "/api/execution/:id"
@@ -102,12 +102,12 @@ Receipt
 
 4. Intent Parser
 
-- [ ] Natural-language request accepted
-- [ ] Target asset parsed
-- [ ] Target amount parsed
-- [ ] Restricted asset parsed
-- [ ] Maximum sell percentage parsed
-- [ ] Missing constraint detected
+- [~] Natural-language request accepted for the documented USDG/NVDA pattern; runtime not yet verified
+- [~] Target asset parsed for USDG; runtime not yet verified
+- [~] Target amount parsed; runtime not yet verified
+- [~] Restricted asset parsed for NVDA; runtime not yet verified
+- [~] Maximum sell percentage parsed; runtime not yet verified
+- [~] Missing constraint returns a clarification; runtime not yet verified
 - [ ] Clarification returned
 - [ ] Parser cannot directly execute transactions
 - [ ] Parser cannot override constraints
@@ -151,8 +151,8 @@ Calculation evidence: Morpho market borrow assets 417104502; borrow shares 41695
 
 7. 0x Swap
 
-- [ ] Robinhood Chain support verified
-- [ ] Required token support verified
+- [x] Robinhood Chain support verified in the official 0x supported-chain table (Swap API, chain ID 4663)
+- [ ] Required token support granted by 0x (live request rejected for legal restrictions)
 - [ ] Quote retrieved
 - [ ] Quote output validated
 - [ ] Minimum output calculated
@@ -165,7 +165,9 @@ Calculation evidence: Morpho market borrow assets 417104502; borrow shares 41695
 
 Evidence:
 
-Network:
+Network: Robinhood Chain (chain ID 4663), officially supported by 0x Swap API.
+Key: configured in the ignored local `backend/.env`; backend status confirmed it is loaded. A live indicative price request for 1 NVDA (`sellAmountRaw=1000000000000000000`) was made on 2026-09-27. 0x rejected it: `The sell token is not authorized for trade due to legal restrictions`. Therefore NVDA selling is blocked for this 0x integrator; no quote or execution can be claimed. 0x documentation says BStocks require tokenized-equity access.
+Endpoints: `GET /api/prices/nvda-to-usdg?sellAmountRaw=<base-units>&taker=<wallet>` (indicative, non-executable) and `GET /api/quotes/nvda-to-usdg?sellAmountRaw=<base-units>&taker=<wallet>` (firm quote).
 Token:
 Quote:
 Transaction:
@@ -179,25 +181,30 @@ Date:
 - [x] Longbow NVDA/USDG market identified and its immutable parameters matched on-chain
 - [x] Collateral asset verified (NVDA)
 - [x] Borrow asset verified (USDG)
-- [~] Market oracle address matched on-chain and official API; feed identity/freshness not yet verified
-- [ ] Supply function verified
-- [ ] Borrow function verified
-- [ ] Combined operation verified if supported
-- [ ] Approval requirements verified
-- [ ] Transaction sequence verified
+- [x] Market oracle address and `RHNVDA / USD` feed identity matched on-chain and official API; freshness remains unverified
+- [x] Direct supply function verified against Morpho's official interface/source
+- [x] Direct borrow function verified against Morpho's official interface/source
+- [x] Atomic `supplyCollateralBorrow` path verified in Morpho SDK and deployed BlueBundlesV1 source/ABI
+- [x] Direct and bundled approval/authorization requirements identified; supplied wallet state read on-chain
+- [x] Call sequence documented: direct flow uses approval then separate supply/borrow calls; bundle flow uses allowance/authorization prerequisites then one atomic supply+borrow call
 - [ ] Simulation successful
 - [ ] Testnet behavior verified
 - [ ] Failure behavior verified
 
 Evidence:
 
-Market:
-Collateral:
-Borrow asset:
-Functions:
-Transaction:
-Result:
-Date:
+Market ID: 0x66306c087add8907752320b309934abcc354d21626de8115c79df49d9c214edc
+Collateral: NVDA (0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC)
+Borrow asset: USDG (0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168)
+Direct functions: Morpho Blue `supplyCollateral(MarketParams,uint256,address,bytes)` and `borrow(MarketParams,uint256,uint256,address,address)`.
+Atomic function: Morpho BlueBundlesV1 `blueBundlesV1SupplyCollateralAndBorrow`; official Morpho SDK exposes this as `supplyCollateralBorrow` on chain 4663.
+Bundle: 0x53A1eB6589861F686af7c531211E35Aefe30210f; live RPC returned bytecode at block 74269354.
+Immutable dependency check: at block 74272226, BlueBundlesV1.BLUE() returned the Morpho Blue core address and PUBLIC_ALLOCATOR() returned the official Morpho Robinhood Chain allocator address; both matched the Morpho SDK registry.
+ABI note: the current Morpho repository's IBlueBundlesV1 interface file has an extra minSharePriceE27 parameter that is absent from the deployed verified contract source and explorer ABI. Use the deployed ABI and official SDK builder, not that mismatched interface file, when constructing calls.
+Approvals: direct NVDA allowance to Morpho; bundled NVDA allowance/permit to BlueBundlesV1 plus Morpho authorization/signature. Direct borrow requires no USDG approval; USDG approval is needed for repayment.
+Supplied wallet at block 74270091: NVDA allowance to Morpho = 0; NVDA allowance to BlueBundlesV1 = 0; BlueBundlesV1 Morpho authorization = false.
+Simulation/transaction: none performed.
+Date: 2026-09-27
 
 ---
 

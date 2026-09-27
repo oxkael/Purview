@@ -51,6 +51,7 @@ Explorer	https://robinhoodchain.blockscout.com (Etherscan does not index this ch
 USDG token	0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168	Confirmed, cross-checked across 3 independent sources
 NVDA Stock Token	0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC	Confirmed, cross-checked across 2 independent sources
 Morpho Blue core (chain 4663)	0x9D53d5E3bd5E8d4Cbfa6DB1ca238AEA02E651010	Confirmed
+Morpho BlueBundlesV1 (chain 4663)	0x53A1eB6589861F686af7c531211E35Aefe30210f	Official Morpho SDK registry; live code present
 Adaptive Curve IRM	0x2BD3d5965B26B51814AC95127B2b80dD6CcC0fa1	Confirmed
 Known trap: do not use the Ethereum-mainnet Morpho Blue address (0xBBBB...FFCb) on this chain — it is a different deployment and will silently fail or point at the wrong state.
 
@@ -59,6 +60,10 @@ Naming collision — disambiguate carefully: "Longbow" refers to three unrelated
 Verified Longbow NVDA/USDG market (mainnet, 2026-09-27): Longbow's official `https://www.longbow.cash/api/markets` record for `NVDA` identifies market ID `0x66306c087add8907752320b309934abcc354d21626de8115c79df49d9c214edc`, USDG loan token, NVDA collateral token, oracle `0xC5b8A6C5fDF14f9744dB1C8595f49E42Ce23031a`, Adaptive Curve IRM, and LLTV `625000000000000000` (62.5%). The Morpho public markets API returned the same immutable parameters, and `idToMarketParams` on the configured Morpho Blue contract returned an exact match. The backend's integration-status endpoint repeats this on-chain parameter check. This verifies market identity and immutable market parameters only; it does not verify borrow/supply execution, market liquidity at execution time, or oracle freshness.
 
 The verified market oracle exposes Chainlink-compatible feed `0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15`, whose on-chain description is `RHNVDA / USD` and decimals are 8. Longbow's official docs state Robinhood equity feeds are 24/5 and hold the last price when US markets are closed; they do not specify a numeric maximum age suitable for this backend's execution gate. The backend reads the live round and reports its age but deliberately leaves freshness unassessed until a feed-specific max-age/market-closure policy is verified.
+
+Borrow integration verification (mainnet, 2026-09-27): Morpho's official source interface and deployed-address registry identify the settlement contract as Morpho Blue and list its core methods `supplyCollateral` and `borrow`. Direct collateral supply uses ERC-20 `transferFrom`, so NVDA allowance to Morpho is required; direct borrowing transfers USDG out and needs no USDG allowance. Direct self-calls do not need a separate Morpho position authorization. Morpho's current official SDK additionally registers BlueBundlesV1 at `0x53A1eB6589861F686af7c531211E35Aefe30210f` for Robinhood Chain; RPC confirmed code at that address. Its `supplyCollateralBorrow` operation is atomic and requires NVDA allowance to the bundle (or supported permit) plus Morpho authorization (or signed authorization). For the supplied wallet at block 74270091, both allowances were zero and bundle authorization was false. No write transaction or state-changing simulation has been performed. See `STATUS.md` for the remaining checks.
+
+ABI reconciliation: the explorer-verified ABI/source for the deployed BlueBundlesV1 at `0x53A1eB6589861F686af7c531211E35Aefe30210f` confirms `blueBundlesV1SupplyCollateralAndBorrow` without a `minSharePriceE27` argument. The current Morpho repository's `IBlueBundlesV1.sol` interface includes that extra argument while its current `BlueBundlesV1.sol` implementation does not. Treat the deployed verified ABI as authority and use Morpho's supported SDK builder; do not hand-encode from the inconsistent interface file. At block 74272226, the bundle's `BLUE()` and `PUBLIC_ALLOCATOR()` getters matched the official Morpho chain registry. Its `maxLtv` argument still needs the product risk policy value and must not be set to the market LLTV by default.
 
 Blocked — do not resolve by guessing:
 
@@ -102,6 +107,8 @@ Query real state server-side — never accept a balance or position the frontend
 8. Planner
 Deterministic. Input: structured intent + validated portfolio/protocol/market state. Output: candidate plans (SELL, BORROW, HYBRID) with constraint checks and a selected feasible plan.
 
+The initial `POST /api/plan` implementation is a read-only preflight only: it fetches wallet and integration state and returns blockers. It intentionally does not calculate candidate amounts while operational risk limits and oracle freshness policy are unset. Do not mark the deterministic planner complete until numeric candidate calculations, hard-constraint checks, and a selected plan are implemented and verified.
+
 Each candidate calculates: amount sold, % sold, amount borrowed, USDG received, resulting LTV, liquidation buffer, fees, price impact, remaining exposure, execution cost, and pass/fail on every hard constraint. Reject any candidate that fails one.
 
 9. Hard Constraint Evaluation
@@ -130,7 +137,7 @@ Use static/read-only execution (eth_call) against the actual swap and borrow cal
 Immediately before execution: refresh portfolio, market, oracle, and protocol state; recalculate constraints; compare against the confirmed plan. If it no longer holds: EXECUTION_BLOCKED. Never execute stale parameters. If any refreshed value can't be obtained cleanly, ask — don't substitute the last known value and proceed.
 
 13. 0x Integration — High Risk, Verify Don't Assume
-0x Price/Swap API is confirmed to support Robinhood Chain generally with a USDG base pair, per earlier project research — but that confirms existence, not this specific integration's correctness. Before this is "done," verify against the real API, on the real network:
+0x's current official supported-chains table confirms Swap API support for Robinhood Chain (4663). Its July 2026 changelog says BStocks are recognized and routable only for integrators with tokenized-equity access. On 2026-09-27, the live indicative price request for 1 NVDA returned `The sell token is not authorized for trade due to legal restrictions`. Treat NVDA selling through this 0x integrator as blocked; do not retry by changing accounts, routes, or parameters to evade the restriction. The key is configured in the ignored local `backend/.env`; keep it there or in the runtime environment, never in tracked files. Read-only endpoints request live indicative prices or firm quotes from the official v2 AllowanceHolder API using a caller-supplied raw amount; firm quotes also require a taker address. An indicative price is not executable. If 0x access is later formally granted, repeat the live request and safety validation before changing this status. Before this integration is "done," verify against the real API on the real network:
 
 Network support for chain 4663 (and separately, 46630, if testnet is in scope)
 Token support for USDG and NVDA specifically
