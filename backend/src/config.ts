@@ -1,7 +1,8 @@
 import 'dotenv/config'
 import { defineChain, getAddress } from 'viem'
 
-const mainnetRpcUrl = process.env.ROBINHOOD_RPC_URL ?? 'https://rpc.mainnet.chain.robinhood.com'
+export const mainnetRpcUrl = process.env.ROBINHOOD_RPC_URL ?? 'https://rpc.mainnet.chain.robinhood.com'
+export const livenessRpcUrl = process.env.ROBINHOOD_LIVENESS_RPC_URL?.trim() ?? ''
 
 export const robinhoodMainnet = defineChain({
   id: 4663,
@@ -79,6 +80,10 @@ export const serverConfig = {
   host: process.env.HOST ?? '127.0.0.1',
   port: Number(process.env.PORT ?? 3001),
   rpcTimeoutMs: 5_000,
+  livenessPolicy: {
+    maxBlockAgeSeconds: optionalInteger('ROBINHOOD_MAX_BLOCK_AGE_SECONDS', 1) ?? 60,
+    maxHeadTimestampSkewSeconds: optionalInteger('ROBINHOOD_MAX_HEAD_SKEW_SECONDS', 1) ?? 30,
+  },
   zeroXApiKey: process.env.ZEROX_API_KEY?.trim() ?? '',
   riskPolicy: {
     // Set only to the exact feed-specific heartbeat confirmed by Chainlink.

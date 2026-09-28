@@ -67,17 +67,22 @@ export async function getReadOnlyPlanPreflight(address: Address, intent: Structu
     borrowBlockers.push(marketClosedBlocker)
   }
 
-  const chainLivenessBlocker = {
-    code: 'CHAIN_LIVENESS_UNVERIFIED',
-    detail: 'No Chainlink sequencer uptime feed has been identified, and an independent liveness substitute has not been approved/configured.',
+  const chainLiveness = integrationStatus.integrations.chainLiveness
+  if (chainLiveness.status !== 'available') {
+    const chainLivenessBlocker = {
+      code: 'CHAIN_LIVENESS_UNVERIFIED',
+      detail: chainLiveness.detail ?? 'Independent Robinhood Chain RPC liveness check did not pass.',
+    }
+    blockers.push(chainLivenessBlocker)
+    borrowBlockers.push(chainLivenessBlocker)
+    sellBlockers.push(chainLivenessBlocker)
   }
-  blockers.push(chainLivenessBlocker)
-  borrowBlockers.push(chainLivenessBlocker)
-  sellBlockers.push(chainLivenessBlocker)
 
   const market = integrationStatus.integrations.longbowMarket
-  const verifiedMarketLltvWad = market.status === 'available'
-    ? BigInt(market.actual?.lltvWad ?? market.expectedLltvWad)
+  // Never fall back to the repo's expected value when live market identity or
+  // parameters failed verification. A mismatch must stay unavailable to risk math.
+  const verifiedMarketLltvWad = market.status === 'available' && market.actual
+    ? BigInt(market.actual.lltvWad)
     : undefined
   const maxOperationalLtvWad = verifiedMarketLltvWad === undefined
     ? undefined
@@ -112,6 +117,42 @@ export async function getReadOnlyPlanPreflight(address: Address, intent: Structu
   }
 
   const oracle = integrationStatus.integrations.chainlink
+  // Morpho Blue oracle prices use 1e36 scaling. Loan assets are USDG raw units
+  // and collateral is NVDA raw units; the market oracle converts between them.
+  // These are current-position diagnostics, not a proposed plan.
+  const marketOraclePriceRaw = 'priceRaw' in oracle && oracle.priceRaw
+    ? BigInt(oracle.priceRaw)
+    : undefined
+  const collateralRaw = BigInt(portfolio.longbowNvdaUsdg.collateralRaw)
+  const debtRaw = BigInt(portfolio.longbowNvdaUsdg.debtAssetsRaw)
+  const collateralValueUsdgRaw = marketOraclePriceRaw !== undefined
+    ? collateralRaw * marketOraclePriceRaw / 10n ** 36n
+    : undefined
+  const currentLtvWad = collateralValueUsdgRaw !== undefined && collateralValueUsdgRaw > 0n
+    ? debtRaw * 10n ** 18n / collateralValueUsdgRaw
+    : undefined
+  const liquidationBufferBps = currentLtvWad !== undefined && verifiedMarketLltvWad !== undefined
+    ? currentLtvWad >= verifiedMarketLltvWad
+      ? 0n
+      : (verifiedMarketLltvWad - currentLtvWad) * 10_000n / verifiedMarketLltvWad
+    : undefined
+  const currentPositionRisk = {
+    status: currentLtvWad !== undefined && liquidationBufferBps !== undefined ? 'calculated' as const : 'unavailable' as const,
+    source: 'Live Morpho position, accrued debt, verified market LLTV, and market oracle price at this preflight read.',
+    collateralValueUsdgRaw: collateralValueUsdgRaw?.toString() ?? null,
+    debtUsdgRaw: debtRaw.toString(),
+    currentLtvWad: currentLtvWad?.toString() ?? null,
+    liquidationBufferBps: liquidationBufferBps?.toString() ?? null,
+    meetsOperationalLtvCap: currentLtvWad !== undefined && maxOperationalLtvWad !== undefined
+      ? currentLtvWad <= maxOperationalLtvWad
+      : null,
+    meetsMinimumLiquidationBuffer: liquidationBufferBps !== undefined
+      ? liquidationBufferBps >= 4_000n
+      : null,
+    detail: currentLtvWad === undefined
+      ? 'Cannot calculate current position LTV: positive collateral value and verified live market/oracle price are required.'
+      : 'Current-position diagnostics only. New collateral, swaps, and borrowing are not assumed or simulated.',
+  }
   const oracleFreshness = 'freshness' in oracle ? oracle.freshness : undefined
   const oracleAgeSeconds = 'feed' in oracle && oracle.feed?.ageSeconds
     ? BigInt(oracle.feed.ageSeconds)
@@ -224,6 +265,7 @@ export async function getReadOnlyPlanPreflight(address: Address, intent: Structu
       detail: 'Quotes are read-only. This preflight does not create router calldata or authorize a transaction.',
     },
     jurisdictionGate,
+    chainLiveness,
     readAt: portfolio.readAt,
     chainId: portfolio.chainId,
     blockNumber: portfolio.blockNumber,
@@ -236,7 +278,7 @@ export async function getReadOnlyPlanPreflight(address: Address, intent: Structu
     market: {
       verification: market,
       oracle,
-      liquidationLtvWad: market.status === 'available' ? market.expectedLltvWad : null,
+      liquidationLtvWad: verifiedMarketLltvWad?.toString() ?? null,
       currentState: {
         totalSupplyAssetsRaw: portfolio.longbowNvdaUsdg.marketSupplyAssetsRaw,
         totalSupplySharesRaw: portfolio.longbowNvdaUsdg.marketSupplySharesRaw,
@@ -247,6 +289,7 @@ export async function getReadOnlyPlanPreflight(address: Address, intent: Structu
         borrowRatePerSecondWad: portfolio.longbowNvdaUsdg.borrowRatePerSecondWad,
         accruedInterestRaw: portfolio.longbowNvdaUsdg.accruedInterestRaw,
       },
+      currentPositionRisk,
       borrowLiquidity: {
         status: 'not_assessed',
         detail: 'Raw market totals are shown; borrowable capacity is not asserted because liquidity and risk-policy checks are incomplete.',
@@ -254,6 +297,6 @@ export async function getReadOnlyPlanPreflight(address: Address, intent: Structu
     },
     strategies,
     blockers,
-    note: 'This read-only preflight does not calculate an amount, build transaction calldata, simulate, sign, or execute. A clear preflight would still require deterministic planning and transaction simulation.',
+    note: 'This read-only preflight includes current-position risk diagnostics only. It does not yet calculate SELL, BORROW, or HYBRID candidate plans, build transaction calldata, simulate, sign, or execute.',
   }
 }

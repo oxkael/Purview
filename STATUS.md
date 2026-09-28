@@ -583,7 +583,7 @@ Purview is demo-ready when:
 - User directs reading `oraclePaused()` from the NVDA token and vetoing when true. The backend now attempts this read; if it reverts or is unavailable, the oracle gate fails closed. A live RPC result still needs confirmation at runtime.
 - The backend derives the operational LTV from verified market parameters and exposes the approved global limits. Plans compare live Uniswap V3 quotes to Chainlink and use the fixed verified pool allowlist. The on-chain LLTV comparison remains against the user's expected 62.5%; a mismatch blocks borrowing.
 - Plan responses now include a jurisdiction disclosure and fail-closed jurisdiction gate. A jurisdiction allow/deny policy and trusted location-verification source are still unconfigured, so this is not yet country-specific geoblocking.
-- Sequencer uptime feed is reported absent. Await approval of an independent liveness substitute before implementation. Testnet deployment support for 0x, Longbow/Morpho, and Chainlink feeds remains unverified.
+- Sequencer uptime feed is reported absent. The later approved RPC-based liveness substitute and its current configuration requirement are recorded below. Testnet deployment support for 0x, Longbow/Morpho, and Chainlink feeds remains unverified.
 - 0x remains restricted for this integrator unless access is formally granted. It is not used as the primary venue or bypassed. Rialto remains an unverified alternative; no integration is built against it.
 
 ## Uniswap V3 NVDA → USDG quote evidence — 2026-09-28
@@ -621,3 +621,43 @@ Execution blockers: (1) open-market heartbeat is provisional at 3,600s plus 60s;
 - `POST /api/plan` now uses a live Uniswap quote for oracle comparison instead of relying on 0x. A fixed unsigned SwapRouter02 exact-input call builder exists in code but is deliberately not exposed/wired until all plan gates are implemented. 0x endpoints remain diagnostic and do not bypass their access restriction.
 - Added a Nasdaq official calendar reader with Eastern Time regular-session hours, published holidays and early closes. It uses a six-hour cache and fails closed if the official page is unavailable or its format/year cannot be parsed. The plan uses the 3,660s open-market age rule, 72h closed sell-only limit, or 96h limit during an identified three-day holiday weekend; closed status blocks borrow/hybrid. Runtime parsing has not yet been validated.
 - Build: `npm.cmd run build` in `backend` passed after these changes. No tests were added or run. No transaction, signature, approval, or write RPC was made.
+
+## Approved chain-liveness substitute — 2026-09-28
+
+- The user approved an independent RPC chain-head liveness check because no sequencer uptime feed was identified. `GET /api/integrations/status` now checks two different RPC hosts, verifies both return chain ID 4663, and compares latest block timestamps. Defaults require each head to be at most 60 seconds old and timestamp skew to be at most 30 seconds. These are conservative application policy defaults, not official Robinhood guarantees.
+- `POST /api/plan` blocks borrow, sell, and hybrid plans unless the check passes. The local `backend/.env` currently uses PublicNode's published Robinhood Chain endpoint (`robinhood-rpc.publicnode.com`) as primary and Robinhood's public RPC as the independent liveness host. No credentials were added or displayed. The primary and secondary endpoints were swapped after the user reported a timeout from Robinhood's public RPC during the plan preflight; the swapped configuration needs a restart and runtime recheck.
+- This substitute checks recent chain-head reporting only. It is not a sequencer status oracle and cannot guarantee transaction inclusion. Read-only probes could not complete in the development environment, so both endpoints still need runtime validation after restarting the backend; the integration fails closed unless they pass.
+- Build: `npm.cmd run build` in `backend` passed after implementation. No tests were added or run, and no live liveness RPC calls or write transactions were made.
+
+### Runtime liveness evidence — 2026-09-28 11:36 UTC
+
+The user checked `GET /api/integrations/status` after restarting the backend. It returned `available`: primary Robinhood RPC block 74766028 (age 7s), PublicNode block 74766040 (age 6s), both chain ID 4663, timestamp skew 1s. Configured policy was max block age 60s and max timestamp skew 30s. This demonstrates the RPC substitute passed at that check time; it remains a point-in-time signal, not a sequencer uptime oracle or transaction-inclusion guarantee.
+
+### Runtime plan-preflight evidence — 2026-09-28 11:45 UTC
+
+The user ran `POST /api/plan` for the supplied wallet with a $3,000 USDG target and `maxSellPercentage=1`. The request completed after the RPC endpoints were swapped. It returned `blocked` and `executable=false`; no transaction data was created, signed, or submitted.
+
+- The official Nasdaq calendar parser completed successfully and classified 2026-09-28 07:45 America/New_York as closed (before the regular 09:30 open). This validates the parser against this live response; the calendar remains point-in-time and cached for six hours.
+- Independent RPC liveness passed: PublicNode and Robinhood public RPC both returned chain 4663; latest block ages were 6s each and timestamp skew was 0s.
+- Morpho market LLTV matched the expected 62.5%; the derived 60%-of-LLTV operational cap is 37.5%.
+- Oracle freshness was within the provisional closed-market sell-only limit (72h); the underlying 3,600s heartbeat remains provisional. The quote response selected the allowlisted 0.05% Uniswap V3 tier for a diagnostic 0.01 NVDA input, output 2.270194 USDG.
+- Blockers: jurisdiction policy/provider is unconfigured; market closed blocks borrow and hybrid; the wallet has zero NVDA and zero Longbow NVDA collateral, so no sell amount is available. Because the wallet's NVDA balance is zero, the 0.01 NVDA quote is a diagnostic fallback, not a quote for selling 1% or for a $3,000 swap. The sell route correctly remains unavailable.
+- 0x remains blocked by its legal-restrictions response and was not used. The preflight is read-only.
+
+## Official Stock Token eligibility and service terms review — 2026-09-28
+
+- Robinhood RHJ's official product disclosure identifies Stock Tokens as tokenized debt securities and says they may not be offered, sold, or delivered in the United States or to/for the account or benefit of U.S. Persons. It also says additional jurisdiction restrictions apply (including Canada, the UK, and Switzerland) and that its current Prohibited Investors include investors in Cuba, Belarus, Iran, North Korea, Russia, Syria, Ukraine, South Sudan, Sudan, Myanmar, and Venezuela. Robinhood states this list can change. This is an issuer restriction relevant to the NVDA Stock Token; it does not by itself resolve whether Purview's distinct lending/collateral service is permitted in any other jurisdiction.
+- Robinhood Chain Terms of Service prohibit describing or marketing Stock Tokens as "tokenized stocks" or "tokenized equities"; approved external wording is "Stock Tokens" or "tokenized real-world assets such as Stock Tokens." They also prohibit misrepresenting location or using VPNs/proxies to evade restrictions. Review user-facing copy before release; internal identifiers have not been changed.
+- Robinhood says its own public RPC is rate-limited and not intended for production-grade, high-throughput or latency-sensitive use. Purview currently uses PublicNode as primary and Robinhood public RPC only as a secondary liveness source.
+- Purview's Uniswap V3 path calls the on-chain Router/Quoter contracts directly; it does not currently use Uniswap Labs' hosted interface or API. That distinction does not override issuer eligibility restrictions or applicable law.
+- 0x's official RWA article says Robinhood Stock Tokens require explicit RWA opt-in and geofencing where required; current requests are processed for legal-entity teams, while individual requests are paused. Purview does not route through 0x.
+- Conclusion for implementation: do not unblock everyone. Keep jurisdiction blocked until the team establishes that Purview's own borrow/collateral service is authorized for a specific user cohort, and configures an eligibility process that accounts for the issuer's restrictions and any additional applicable requirements. No legal conclusion has been made about the service.
+
+Official references: https://docs.robinhood.com/rhj/restricted-jurisdictions/ ; https://docs.robinhood.com/chain/terms-of-service/ ; https://docs.robinhood.com/chain/connecting/ ; https://help.0x.org/articles/5420296643-xstocks-support-on-0x
+### 2026-09-28: Current-position risk diagnostics
+
+- Added read-only current-position risk fields to `POST /api/plan`: collateral value in USDG raw units, accrued debt, current LTV, price-drop buffer to verified market LLTV, and comparisons against the approved operational LTV/buffer limits.
+- The calculation uses the live Morpho oracle's 1e36 price and the portfolio values read at the same reported block. These are diagnostics for the existing position, not candidate-plan outcomes.
+- Removed fallback to expected LLTV when on-chain market verification is unavailable or mismatched. Risk math now requires verified live parameters.
+- TypeScript build passed with `npm.cmd run build`.
+- Candidate planning remains incomplete. Before implementing deterministic selection, product behavior needs definition for the objective among feasible plans and what HYBRID is allowed to do. Execution-cost USDG valuation also needs an authoritative gas-price/asset-price method or full-path simulation source.
