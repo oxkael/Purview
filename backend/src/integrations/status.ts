@@ -41,6 +41,37 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unknown RPC error'
 }
 
+async function getNvdaOraclePausedStatus() {
+  try {
+    const paused = await client.readContract({
+      address: configuredContracts.nvda,
+      abi: [{
+        type: 'function',
+        name: 'oraclePaused',
+        stateMutability: 'view',
+        inputs: [],
+        outputs: [{ name: '', type: 'bool' }],
+      }] as const,
+      functionName: 'oraclePaused',
+    })
+
+    return {
+      status: paused ? 'blocked' as const : 'available' as const,
+      address: configuredContracts.nvda,
+      paused,
+      detail: paused
+        ? 'NVDA token oraclePaused() returned true; oracle use is vetoed.'
+        : 'NVDA token oraclePaused() returned false.',
+    }
+  } catch (error) {
+    return {
+      status: 'unavailable' as const,
+      address: configuredContracts.nvda,
+      detail: `Could not read oraclePaused() from the NVDA token; oracle use is vetoed. ${errorMessage(error)}`,
+    }
+  }
+}
+
 export async function getIntegrationStatus() {
   let rpc: {
     status: ProbeStatus
@@ -99,6 +130,14 @@ export async function getIntegrationStatus() {
         detail: 'RPC chain was not verified.',
       }
 
+  const nvdaTokenOracle = rpc.status === 'available'
+    ? await getNvdaOraclePausedStatus()
+    : {
+        status: 'not_checked' as const,
+        address: configuredContracts.nvda,
+        detail: 'RPC chain was not verified; oraclePaused() was not read.',
+      }
+
   const morphoBundles = rpc.status === 'available'
     ? await getBlueBundlesStatus()
     : { status: 'not_checked' as const, address: configuredContracts.morphoBlueBundlesV1, detail: 'RPC chain was not verified.' }
@@ -131,9 +170,18 @@ export async function getIntegrationStatus() {
       longbowMarket,
       morphoBlueBundlesV1: morphoBundles,
       chainlink: longbowOracle,
+      nvdaTokenOracle,
+      uniswapV3: {
+        status: 'configured' as const,
+        factory: '0x1f7d7550b1b028f7571e69a784071f0205fd2efa',
+        quoterV2: '0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7',
+        swapRouter02: '0xcaf681a66d020601342297493863e78c959e5cb2',
+        allowlistedFees: [100, 500, 3000],
+        detail: 'Read-only QuoterV2 path is implemented. Each quote verifies the allowlisted pool identity onchain; a fixed unsigned call builder exists but is not exposed until all plan gates are wired.',
+      },
       router: {
         status: 'not_checked' as const,
-        detail: 'No router contract has been implemented or deployed.',
+        detail: 'The fixed unsigned call builder is not exposed or wired to signing, approvals, simulation, or submission. Uniswap SwapRouter02 is configured as the destination.',
       },
     },
     note: 'RPC reachability and bytecode presence are diagnostic checks only; they do not verify token identity, market support, ABI behavior, safety, or execution readiness.',

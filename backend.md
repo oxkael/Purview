@@ -59,7 +59,7 @@ Naming collision — disambiguate carefully: "Longbow" refers to three unrelated
 
 Verified Longbow NVDA/USDG market (mainnet, 2026-09-27): Longbow's official `https://www.longbow.cash/api/markets` record for `NVDA` identifies market ID `0x66306c087add8907752320b309934abcc354d21626de8115c79df49d9c214edc`, USDG loan token, NVDA collateral token, oracle `0xC5b8A6C5fDF14f9744dB1C8595f49E42Ce23031a`, Adaptive Curve IRM, and LLTV `625000000000000000` (62.5%). The Morpho public markets API returned the same immutable parameters, and `idToMarketParams` on the configured Morpho Blue contract returned an exact match. The backend's integration-status endpoint repeats this on-chain parameter check. This verifies market identity and immutable market parameters only; it does not verify borrow/supply execution, market liquidity at execution time, or oracle freshness.
 
-The verified market oracle exposes Chainlink-compatible feed `0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15`, whose on-chain description is `RHNVDA / USD` and decimals are 8. Longbow's official docs state Robinhood equity feeds are 24/5 and hold the last price when US markets are closed; they do not specify a numeric maximum age suitable for this backend's execution gate. The backend reads the live round and reports its age but deliberately leaves freshness unassessed until a feed-specific max-age/market-closure policy is verified.
+The verified market oracle exposes Chainlink-compatible feed `0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15`, whose on-chain description is `RHNVDA / USD` and decimals are 8. Chainlink's official Robinhood docs state feeds operate 24/5 and publish no updates or heartbeat while markets are closed; they do not specify a numeric open-market heartbeat or numerical weekend stale limit. The backend provisionally uses the product-owner-supplied 3,600-second open-market heartbeat plus 60 seconds. Closed-market sell-only limits are provisionally 72 hours for an ordinary closure and 96 hours for a three-day holiday weekend; these are product policy inputs, not numeric values published by Chainlink. These closed-session limits are not applied until a trusted market calendar confirms the session, and they never permit borrow or hybrid plans.
 
 Borrow integration verification (mainnet, 2026-09-27): Morpho's official source interface and deployed-address registry identify the settlement contract as Morpho Blue and list its core methods `supplyCollateral` and `borrow`. Direct collateral supply uses ERC-20 `transferFrom`, so NVDA allowance to Morpho is required; direct borrowing transfers USDG out and needs no USDG allowance. Direct self-calls do not need a separate Morpho position authorization. Morpho's current official SDK additionally registers BlueBundlesV1 at `0x53A1eB6589861F686af7c531211E35Aefe30210f` for Robinhood Chain; RPC confirmed code at that address. Its `supplyCollateralBorrow` operation is atomic and requires NVDA allowance to the bundle (or supported permit) plus Morpho authorization (or signed authorization). For the supplied wallet at block 74270091, both allowances were zero and bundle authorization was false. No write transaction or state-changing simulation has been performed. See `STATUS.md` for the remaining checks.
 
@@ -67,8 +67,9 @@ ABI reconciliation: the explorer-verified ABI/source for the deployed BlueBundle
 
 Blocked — do not resolve by guessing:
 
-The product risk policy's operational `maxLtv` and `minBuffer`. The verified market LLTV of 62.5% is the protocol liquidation threshold, not automatically a safe operating target. Do not set operational `maxLtv` equal to LLTV or invent a buffer. Until these policy values and their calculation are explicitly established, borrowing plans must remain blocked.
-The `RHNVDA / USD` freshness policy for execution. Longbow's official docs explain 24/5 behavior and periodic watchdog checks but do not give an execution max-age threshold. A successful oracle `price()` call does not prove its latest Chainlink round is fresh. Keep the safety gate blocked until the feed heartbeat/max-age rule and weekend handling are established from an official source or explicit product policy.
+Approved risk policy (2026-09-28): maximum operational LTV is 60% of the selected market's live on-chain LLTV, with a minimum 40% collateral-price-drop buffer. Derive the cap from verified on-chain market parameters; the expected NVDA LLTV is 62.5%, and any difference blocks borrowing and must be surfaced. Global maximum slippage is 1%, maximum execution cost is 1.5% of target, and maximum oracle-to-selected-live-venue quote deviation is 2%. Uniswap V3 is the approved primary venue. User-specific limits may only tighten these caps.
+The `RHNVDA / USD` feed address, description, and decimals are verified. Chainlink's official Robinhood feed docs confirm 24/5 operation and no updates/heartbeats while US equity markets are closed, but do not publish numeric open-market heartbeat or closed-session max age. By product-owner direction, the backend provisionally uses the online-reported 3,600-second heartbeat with the approved +60-second tolerance; status and quote responses mark it provisional. Closed-market sell-only bounds are provisionally 72 hours normally and 96 hours for a three-day holiday weekend, supplied by the product owner; these are not represented as Chainlink-published values. Set `NVDA_ORACLE_HEARTBEAT_SECONDS`, `NVDA_ORACLE_CLOSED_SELL_MAX_AGE_SECONDS`, and `NVDA_ORACLE_HOLIDAY_SELL_MAX_AGE_SECONDS` to later verified/approved values. The reported 0.5% update trigger is informational, not the oracle-to-quote safety limit; the 2% quote-deviation rule remains. Read `oraclePaused()` from the NVDA token and veto when true; round freshness remains the primary guard. The approved Nasdaq calendar reader is implemented with fail-closed network/parse handling; live parsing is not yet validated. Closed market blocks BORROW and HYBRID but permits SELL-only, subject to all other safety gates.
+Sequencer uptime feed: product owner reports none exists. Propose an independent chain-liveness substitute and wait for approval; do not silently skip this gate. Testnet availability remains unverified for 0x, Longbow/Morpho, and Chainlink feed deployments on chain 46630.
 Whether 0x API, Longbow/Morpho markets, and Chainlink feeds are actually live on testnet (46630), not just mainnet (4663). Every address above was found in a mainnet context. If any of these integrations only exist on mainnet, that's a decision Sadiq needs to make explicitly (demo on mainnet with small real amounts vs. mock that specific leg under MOCK_MODE=true, disclosed honestly in the pitch) — not something to decide unilaterally.
 5. API Surface
 GET  /api/health
@@ -116,11 +117,12 @@ Machine-checkable, not prose:
 
 sellAmount        <= maxSellAmount
 usdReceived        >= targetAmount
-resultingLtv       <= maxLtv          // explicit product risk policy; must be below market LLTV
-liquidationBuffer  >= minBuffer       // explicit product risk policy; currently BLOCKED
-slippage           <= maxSlippage     // suggested starting default: 1% — Sadiq's call to tune
-executionCost      <= maxExecutionCost // suggested starting default: 1.5% of targetAmount — Sadiq's call to tune
-marketLltv must be read from the selected market's verified on-chain parameters. It is a hard upper bound, not the operational maxLtv. maxLtv and minBuffer must not ship with placeholder values. Leave operational risk limits unset and fail loudly (INTEGRATION_UNAVAILABLE) until the product risk policy in §4 is resolved.
+resultingLtv       <= 60% of live on-chain market LLTV
+liquidationBuffer  >= 40% price drop before market LLTV
+slippage           <= 1%
+executionCost      <= 1.5% of targetAmount
+oracleQuoteDeviation <= 2% versus selected live Uniswap V3 quote
+marketLltv must be read from the selected market's verified on-chain parameters. If NVDA LLTV differs from the approved 62.5% expectation, stop and report it. User-specific limits may tighten the global caps only.
 
 10. Safety Gate
 Veto power, in sequence:
@@ -129,6 +131,8 @@ Oracle available? → Oracle fresh? → Asset active? → Protocol active?
   → Price within bounds? → Plan satisfies constraints? → Simulation successful?
   → Proceed / Halt
 A failure at any stage blocks execution. No stage may be skipped for convenience.
+
+Jurisdiction gate: planning and execution remain blocked until an approved jurisdiction policy and trusted location-verification source are configured. Do not infer a user's jurisdiction from a client-supplied value. Plans must disclose that legal availability depends on jurisdiction and that the backend has not determined the user's legal eligibility. The jurisdiction allow/deny list and location provider require explicit product approval; do not invent them.
 
 11. Simulation
 Use static/read-only execution (eth_call) against the actual swap and borrow call paths — not a reproduction of the planner's arithmetic. Verify expected output, resulting risk metrics, and revert behavior. A successful simulation is evidence, not a guarantee; chain state can move after it.
@@ -150,6 +154,8 @@ Swap target address
 Recipient handling
 A real simulation, then a real test execution
 If any of these can't be confirmed with a live call, stop and report exactly which one — don't write the integration against an assumed shape of the response.
+
+Uniswap V3 primary venue (Robinhood Chain 4663): use only the verified 0.01%, 0.05%, and 0.30% fee tiers with pool addresses defined in `backend/src/config.ts`. Do not use the 1% zero-liquidity pool, V4, a caller-supplied pool, or arbitrary calldata. Read-only quotes use QuoterV2; verify the pool's factory, token order, and fee onchain. Discard quotes more than 2% from Chainlink, then discard tiers whose effective price at size is more than 1% worse than the best eligible 0.01 NVDA reference quote, then select the highest USDG output. `GET /api/uniswap/quotes/nvda-to-usdg` implements this as a read-only quote path. A fixed unsigned call builder encodes only SwapRouter02 `exactInputSingle` inside its deadline-checked multicall, applies a 1% minimum-output haircut, and uses a 120-second deadline. The wallet transaction nonce is the replay control for direct calls; no extra Purview nonce is used. The builder is not exposed or wired to execution until freshness, runtime calendar validation, jurisdiction, chain-liveness, approvals, and simulation gates are complete.
 
 14. Longbow Integration — Highest Risk
 Do not write ABI calls or a supply/borrow function signature from inference. Verify against the actual deployed contract and Longbow's actual curated market:

@@ -479,15 +479,15 @@ Update only when evidence exists.
 22. Current Blockers
 
 Blocker: Operational borrow-risk policy
-Status: [?] The Longbow NVDA/USDG market is identified and its on-chain LLTV is 62.5%. That is the liquidation threshold, not the product's safe operating maxLtv. No operational maxLtv or minimum liquidation-buffer policy has been established.
-Impact: Borrow planning and execution must remain blocked until explicit policy thresholds are defined; no placeholder or inferred buffer may be used.
-Next action: Establish the operational maxLtv below 62.5% and the minimum liquidation buffer, with documented definitions and units. Then implement those policy checks.
+Status: [x] Product owner approved maximum operational LTV at 60% of live on-chain LLTV and a 40% minimum collateral price-drop buffer. Backend derives the cap from the verified market parameters; this prior blocker is resolved.
+Impact: The policy is configured. Borrow execution remains blocked by the outstanding oracle, session, jurisdiction, and liveness gates below.
+Next action: Continue clearing the remaining execution gates; stop borrowing if on-chain LLTV differs from the approved 62.5% expectation.
 Owner: Sadiq / implementation agent
 
 Blocker: Chainlink feed freshness policy
-Status: [?] The market oracle resolves to feed 0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15 (RHNVDA / USD, 8 decimals). At the 2026-09-27 21:19 UTC check its latest round was 177802 seconds old. Longbow's official docs describe 24/5 feeds and last-price behavior when US markets are closed, but no execution max-age threshold or weekend rule was found.
-Impact: The feed's current round cannot be declared fresh, so the oracle safety gate must block planning/execution.
-Next action: Verify the feed-specific heartbeat/max-age and market-closure handling from Longbow/Chainlink official sources or set an explicit, reviewed product policy; then enforce it on every plan and final recheck.
+Status: [?] Feed identity is verified. The backend uses a provisional 3,600-second open-market heartbeat plus 60 seconds. For closed-market sell-only plans, product-owner provisional limits are 72 hours (ordinary closure) and 96 hours (three-day holiday weekend). Chainlink has not published/confirmed these numeric values for this feed/network; its docs direct integrators to define their own stale-data behavior.
+Impact: Open-market freshness and closed-market sell age are assessed using provisional policy. Closed-session bounds are not applied until the approved calendar identifies the session. Borrow/hybrid remain blocked during closed sessions. Other execution gates still block execution.
+Next action: Replace the provisional heartbeat if Chainlink confirms a different feed-specific value. The Nasdaq calendar parser/gate is implemented and fails closed; validate its live response before exposing plan or execution behavior.
 Owner: Sadiq / implementation agent
 
 ---
@@ -575,3 +575,49 @@ Purview is demo-ready when:
 - Backup demo material exists.
 
 «Green means demonstrated, not merely coded.»
+
+## Approved risk-policy update — 2026-09-28
+
+- Product owner approved max operational LTV = 60% of live on-chain LLTV, 40% minimum liquidation price-drop buffer, 1% max slippage, 1.5% max execution cost, and 2% maximum deviation from the selected live venue quote. Uniswap V3 is now the primary venue. User limits may only tighten these values. The older entries above saying this policy is unapproved are superseded.
+- Chainlink NVDA feed address is verified. The official Robinhood feed docs establish 24/5 behavior and no off-hours heartbeat, but do not state numeric open-market heartbeat or weekend-age values. At the product owner's direction, the backend provisionally uses 3,600 seconds plus the approved 60-second tolerance for open market. It also records 72-hour ordinary-closure and 96-hour three-day holiday-weekend age limits for closed-market sell-only policy; these are provisional product settings, not numeric Chainlink recommendations. They are not applied until the approved market calendar identifies a closed session. The reported 0.5% deviation trigger is informational, not an execution limit; the approved 2% quote-deviation gate remains.
+- User directs reading `oraclePaused()` from the NVDA token and vetoing when true. The backend now attempts this read; if it reverts or is unavailable, the oracle gate fails closed. A live RPC result still needs confirmation at runtime.
+- The backend derives the operational LTV from verified market parameters and exposes the approved global limits. Plans compare live Uniswap V3 quotes to Chainlink and use the fixed verified pool allowlist. The on-chain LLTV comparison remains against the user's expected 62.5%; a mismatch blocks borrowing.
+- Plan responses now include a jurisdiction disclosure and fail-closed jurisdiction gate. A jurisdiction allow/deny policy and trusted location-verification source are still unconfigured, so this is not yet country-specific geoblocking.
+- Sequencer uptime feed is reported absent. Await approval of an independent liveness substitute before implementation. Testnet deployment support for 0x, Longbow/Morpho, and Chainlink feeds remains unverified.
+- 0x remains restricted for this integrator unless access is formally granted. It is not used as the primary venue or bypassed. Rialto remains an unverified alternative; no integration is built against it.
+
+## Uniswap V3 NVDA → USDG quote evidence — 2026-09-28
+
+Scope: read-only `eth_call` only; no swap transaction, signature, approval, or router calldata was sent. User approved the Uniswap V3 0.01%, 0.05%, and 0.30% pools, excluding the 1.00% pool and all V4 pools.
+
+Evidence source: Robinhood Chain public RPC, chain ID 4663, all calls pinned to block `74711112` (`0x4740048`), timestamp `2026-09-28T10:03:53Z`. Uniswap's official Robinhood V3 factory is `0x1f7d7550b1b028f7571e69a784071f0205fd2efa`; its `getPool(USDG,NVDA,fee)` results matched each allowlisted pool, and each pool's `factory()` returned that factory. USDG/NVDA decimals read on-chain: 6/18. QuoterV2 `0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7` was called with `quoteExactInputSingle`; no executable quote API was used.
+
+Pool addresses: 0.01% `0xb75d2d02b0ec3de50d32e40a4f1a8dae8acc4333`; 0.05% `0xd4eb21209c4d6093f80b5b84f5c45cc093ea14a3`; 0.30% `0xb944cec30bd4175855215d767adc81f39e5f7e2b`. The 1.00% pool `0xc277560df3689a401ba7dedd7626168b234ceb5e` had zero active liquidity at the read snapshot and is excluded.
+
+NVDA input sizes: `0.010000000000000000` NVDA; `13.371168833616368634` NVDA (approximately $3,000); `44.570562778721228780` NVDA (approximately $10,000). The approximate USD sizes use the configured, previously on-chain-verified RHNVDA/USD feed. At this block, its answer was `$224.36333258`, `updatedAt=1790586063` (`2026-09-28T09:01:03Z`), age `3770` seconds; `oraclePaused()` on the NVDA token returned `false`. The Chainlink heartbeat has not been supplied, so the round's freshness cannot be certified. It would require a published heartbeat of at least 3710 seconds to satisfy heartbeat + 60 seconds at this snapshot. Comparisons below are therefore diagnostic/provisional; no execution tier is authorized until freshness is confirmed.
+
+For each row, impact is the effective quote price versus that pool's `slot0` marginal price. Chainlink difference is `(effective quote price / $224.36333258) - 1`. USDG outputs are raw QuoterV2 outputs converted using 6 decimals.
+
+| Fee tier | NVDA input | USDG output | Effective USDG/NVDA | Impact vs `slot0` | Difference vs Chainlink | Result |
+|---:|---:|---:|---:|---:|---:|---|
+| 0.01% | 0.01 | 2.071671 | 207.1671 | 0.011% | -7.664% | Drop: exceeds 2% oracle deviation |
+| 0.01% | ~3,000 USD | 82.296459 | 6.1548 | 97.029% | -97.257% | Drop: quote reaches `MAX_SQRT_RATIO` price limit; not a complete usable fill; also exceeds deviation |
+| 0.01% | ~10,000 USD | 82.296459 | 1.8464 | 99.109% | -99.177% | Drop: quote reaches `MAX_SQRT_RATIO` price limit; not a complete usable fill; also exceeds deviation |
+| 0.05% | 0.01 | 2.245904 | 224.5904 | 0.050% | +0.101% | Passes both quote filters |
+| 0.05% | ~3,000 USD | 3,002.981042 | 224.5863 | 0.052% | +0.099% | Passes both quote filters |
+| 0.05% | ~10,000 USD | 10,009.497642 | 224.5764 | 0.056% | +0.095% | Passes both quote filters |
+| 0.30% | 0.01 | 2.241629 | 224.1629 | 0.300% | -0.089% | Passes both quote filters |
+| 0.30% | ~3,000 USD | 2,981.768795 | 222.9999 | 0.818% | -0.608% | Passes both quote filters |
+| 0.30% | ~10,000 USD | 9,811.109795 | 220.1253 | 2.096% | -1.889% | Drop: 1.988% worse than the best 0.01-NVDA reference quote |
+
+Reference interpretation: the best 0.01-NVDA quote passing the 2% Chainlink comparison, 0.05% tier at `224.5904 USDG/NVDA`. After applying both quote filters, 0.05% gives the highest output at all three requested sizes. This is a provisional read-only selection pending Chainlink heartbeat confirmation.
+
+Execution blockers: (1) open-market heartbeat is provisional at 3,600s plus 60s; closed-sell age bounds are provisional at 72h/96h; (2) Nasdaq calendar parsing is implemented but live response/parsing has not been runtime-validated; jurisdiction and chain-liveness gates remain incomplete; (3) the plan remains read-only, and no approval, simulation, signing, or submission path exists. SwapRouter02's `exactInputSingle` takes no deadline or app-level nonce; its deadline wrapper is `multicall(uint256 deadline,bytes[])`. The user accepts wallet transaction nonce plus a 120-second deadline for the direct route, and may later provide a wrapper contract for consumed-request replay protection. A fixed unsigned call builder encodes only exact-input calldata to the verified SwapRouter02, selects a fee from the allowlist, derives `amountOutMinimum` at 99% of the fresh quote, and adds the deadline. It refuses to build if the configured open-market heartbeat freshness check fails or `oraclePaused()` is true. It is not wired to an API until the remaining plan gates are implemented.
+
+## Uniswap quote integration groundwork — 2026-09-28
+
+- Added a read-only `GET /api/uniswap/quotes/nvda-to-usdg?amountInRaw=...` backed by QuoterV2. Each call validates the factory mapping and pool token/fee/factory identity for the 0.01%, 0.05%, and 0.30% allowlist before quoting. The zero-liquidity 1% tier and V4 are not accepted.
+- Returns output, effective price, slot0 impact, Chainlink deviation, quote completeness, and selected fee tier. Applies the 2% oracle-deviation bound using integer cross multiplication and compares each requested-size price against the best eligible 0.01 NVDA reference quote using an exact 1% bound. Freshness uses the provisional 3,600s heartbeat + 60s until a Chainlink-confirmed value is supplied, and the response labels that provisional source.
+- `POST /api/plan` now uses a live Uniswap quote for oracle comparison instead of relying on 0x. A fixed unsigned SwapRouter02 exact-input call builder exists in code but is deliberately not exposed/wired until all plan gates are implemented. 0x endpoints remain diagnostic and do not bypass their access restriction.
+- Added a Nasdaq official calendar reader with Eastern Time regular-session hours, published holidays and early closes. It uses a six-hour cache and fails closed if the official page is unavailable or its format/year cannot be parsed. The plan uses the 3,660s open-market age rule, 72h closed sell-only limit, or 96h limit during an identified three-day holiday weekend; closed status blocks borrow/hybrid. Runtime parsing has not yet been validated.
+- Build: `npm.cmd run build` in `backend` passed after these changes. No tests were added or run. No transaction, signature, approval, or write RPC was made.

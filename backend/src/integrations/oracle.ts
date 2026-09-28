@@ -1,5 +1,5 @@
 import { createPublicClient, http, type Address } from 'viem'
-import { configuredContracts, longbowNvdaUsdgMarket, robinhoodMainnet, serverConfig } from '../config.js'
+import { configuredContracts, longbowNvdaUsdgFeed, longbowNvdaUsdgMarket, robinhoodMainnet, serverConfig } from '../config.js'
 
 const client = createPublicClient({
   chain: robinhoodMainnet,
@@ -112,13 +112,18 @@ export async function getLongbowOracleStatus() {
       client.getBlockNumber(),
     ])
     const latestBlock = await client.getBlock({ blockNumber: latestBlockNumber })
-    const ageSeconds = latestBlock.timestamp >= round.updatedAt
-      ? (latestBlock.timestamp - round.updatedAt).toString()
-      : null
-    const roundDataValid = round.answer > 0n && round.updatedAt > 0n && round.answeredInRound >= round.roundId
+    const age = latestBlock.timestamp >= round.updatedAt ? latestBlock.timestamp - round.updatedAt : null
+    const ageSeconds = age?.toString() ?? null
+    const feedIdentityValid = expectedFeed.toLowerCase() === longbowNvdaUsdgFeed.toLowerCase() && description === 'RHNVDA / USD' && decimals === 8
+    const roundDataValid = oraclePrice > 0n && round.answer > 0n && round.updatedAt > 0n && round.answeredInRound >= round.roundId && age !== null
+    const maxAgeSeconds = serverConfig.riskPolicy.nvdaOracleMaxAgeSeconds
+    const freshnessStatus = maxAgeSeconds === undefined || age === null
+      ? 'unassessed' as const
+      : age <= BigInt(maxAgeSeconds) ? 'fresh' as const : 'stale' as const
+    const oracleUsable = feedIdentityValid && roundDataValid && freshnessStatus === 'fresh'
 
     return {
-      status: roundDataValid ? 'blocked' as const : 'unavailable' as const,
+      status: !feedIdentityValid || !roundDataValid ? 'unavailable' as const : oracleUsable ? 'available' as const : 'blocked' as const,
       oracle: configuredOracle,
       priceRaw: oraclePrice.toString(),
       feed: {
@@ -132,12 +137,37 @@ export async function getLongbowOracleStatus() {
         answeredInRound: round.answeredInRound.toString(),
       },
       freshness: {
-        status: 'unassessed' as const,
-        detail: 'Feed-specific maximum age is not configured; a valid-looking round is not being treated as fresh.',
+        status: freshnessStatus,
+        heartbeatSeconds: serverConfig.riskPolicy.nvdaOracleHeartbeatSeconds,
+        provisional: serverConfig.riskPolicy.nvdaOracleHeartbeatProvisional,
+        source: serverConfig.riskPolicy.nvdaOracleHeartbeatProvisional
+          ? 'Product-owner-approved online-reported value; not Chainlink-confirmed for Robinhood Chain.'
+          : 'Configured Chainlink-confirmed feed heartbeat.',
+        maxAgeSeconds: maxAgeSeconds ?? null,
+        closedMarketSellOnly: {
+          status: age === null ? 'invalid' as const
+            : age <= BigInt(serverConfig.riskPolicy.nvdaOracleClosedSellMaxAgeSeconds) ? 'within_limit' as const : 'stale' as const,
+          maxAgeSeconds: serverConfig.riskPolicy.nvdaOracleClosedSellMaxAgeSeconds,
+          maxAgeForThreeDayHolidayWeekendSeconds: serverConfig.riskPolicy.nvdaOracleHolidaySellMaxAgeSeconds,
+          provisional: serverConfig.riskPolicy.nvdaOracleClosedSellMaxAgeProvisional
+            || serverConfig.riskPolicy.nvdaOracleHolidaySellMaxAgeProvisional,
+          detail: 'These closed-market sell-only age bounds are provisional product policy. The session-aware planner applies the relevant bound only after Nasdaq confirms a closed session; closed status never permits borrow or hybrid.',
+        },
+        detail: maxAgeSeconds === undefined
+          ? 'Feed-specific maximum age is not configured; a valid-looking round is not treated as fresh.'
+          : age === null
+            ? 'Feed timestamp is later than the latest chain block timestamp.'
+            : freshnessStatus === 'fresh'
+              ? `Round age ${ageSeconds}s is within heartbeat ${serverConfig.riskPolicy.nvdaOracleHeartbeatSeconds}s plus 60s (${maxAgeSeconds}s maximum).${serverConfig.riskPolicy.nvdaOracleHeartbeatProvisional ? ' This heartbeat is provisional.' : ''}`
+              : `Round age ${ageSeconds}s exceeds heartbeat ${serverConfig.riskPolicy.nvdaOracleHeartbeatSeconds}s plus 60s (${maxAgeSeconds}s maximum).${serverConfig.riskPolicy.nvdaOracleHeartbeatProvisional ? ' This heartbeat is provisional.' : ''}`,
       },
-      detail: roundDataValid
-        ? 'Feed and oracle calls succeeded. Execution remains blocked until feed identity and maximum-age policy are validated.'
-        : 'Oracle round data failed basic validity checks.',
+      detail: !feedIdentityValid
+        ? 'Oracle feed address, description, or decimals do not match the verified RHNVDA / USD feed.'
+        : !roundDataValid
+          ? 'Oracle round data failed basic validity checks.'
+          : oracleUsable
+            ? 'Verified feed identity and round satisfy the configured freshness policy.'
+            : 'Feed identity and round are valid, but freshness policy is unconfigured or the round is stale.',
     }
   } catch (error) {
     return {

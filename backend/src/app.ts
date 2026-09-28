@@ -6,6 +6,7 @@ import { getNvdaToUsdgPrice, getNvdaToUsdgQuote, parseTakerAddress, ZeroXError }
 import { parseIntent } from './intent.js'
 import { getReadOnlyPlanPreflight } from './planner.js'
 import type { StructuredIntent } from './intent.js'
+import { getUniswapNvdaToUsdgQuotes } from './integrations/uniswap.js'
 
 export function buildApp() {
   const app = Fastify({ logger: true })
@@ -114,6 +115,23 @@ export function buildApp() {
       }
       request.log.error({ err: error }, 'Live 0x quote request failed')
       return reply.code(502).send({ error: 'QUOTE_UNAVAILABLE', detail: 'Live 0x quote could not be retrieved.' })
+    }
+  })
+
+  app.get<{ Querystring: { amountInRaw?: string } }>('/api/uniswap/quotes/nvda-to-usdg', async (request, reply) => {
+    const { amountInRaw } = request.query
+    if (!amountInRaw || !/^\d+$/.test(amountInRaw) || BigInt(amountInRaw) <= 0n) {
+      return reply.code(400).send({ error: 'INVALID_INTENT', detail: 'Provide amountInRaw as a positive integer NVDA amount in base units.' })
+    }
+
+    try {
+      return reply.send(await getUniswapNvdaToUsdgQuotes(amountInRaw))
+    } catch (error) {
+      request.log.error({ err: error }, 'Read-only Uniswap V3 quote failed')
+      return reply.code(502).send({
+        error: 'QUOTE_UNAVAILABLE',
+        detail: error instanceof Error ? error.message : 'Uniswap V3 quote could not be retrieved.',
+      })
     }
   })
 

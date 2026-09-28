@@ -12,6 +12,8 @@ npm run dev
 
 `npm run dev` compiles and starts the service. Run it again after source changes. `npm run build` compiles the service and `npm start` runs the compiled output. The service does not require a wallet private key. Do not add one for the read-only framework.
 
+The planner derives the global operational LTV cap as 60% of the verified on-chain market LLTV and uses a 40% minimum liquidation price-drop buffer. It does not use a hardcoded LLTV to calculate that cap. Oracle freshness provisionally uses a 3,600-second heartbeat plus 60 seconds, clearly marked provisional until Chainlink confirms the feed-specific value. Override with `NVDA_ORACLE_HEARTBEAT_SECONDS` when verified. Market-session, chain-liveness, and jurisdiction gates still fail closed; no plan is executable.
+
 ## Endpoints
 
 - `GET /api/health`: process health; does not imply that chain integrations are available.

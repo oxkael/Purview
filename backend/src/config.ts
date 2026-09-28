@@ -36,12 +36,63 @@ export const longbowNvdaUsdgMarket = {
   lltvWad: 625_000_000_000_000_000n,
 } as const
 
+export const longbowNvdaUsdgFeed = getAddress('0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15')
+
+// Robinhood Chain Uniswap V3 deployment and pools verified by pinned-block
+// RPC reads on 2026-09-28. Keep the fee allowlist explicit; do not accept
+// arbitrary fee tiers or V4 routes from callers.
+export const uniswapV3 = {
+  factory: getAddress('0x1f7d7550b1b028f7571e69a784071f0205fd2efa'),
+  quoterV2: getAddress('0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7'),
+  swapRouter02: getAddress('0xcaf681a66d020601342297493863e78c959e5cb2'),
+  nvdaUsdgPools: [
+    { fee: 100, address: getAddress('0xb75d2d02b0ec3de50d32e40a4f1a8dae8acc4333') },
+    { fee: 500, address: getAddress('0xd4eb21209c4d6093f80b5b84f5c45cc093ea14a3') },
+    { fee: 3000, address: getAddress('0xb944cec30bd4175855215d767adc81f39e5f7e2b') },
+  ],
+} as const
+
+function optionalInteger(name: string, min: number, max = Number.MAX_SAFE_INTEGER): number | undefined {
+  const raw = process.env[name]?.trim()
+  if (!raw) return undefined
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`)
+  }
+  return value
+}
+
+const configuredNvdaHeartbeatSeconds = optionalInteger(
+  'NVDA_ORACLE_HEARTBEAT_SECONDS', 1, Number.MAX_SAFE_INTEGER - 60,
+)
+const configuredClosedSellMaxAgeSeconds = optionalInteger('NVDA_ORACLE_CLOSED_SELL_MAX_AGE_SECONDS', 1)
+const configuredHolidaySellMaxAgeSeconds = optionalInteger('NVDA_ORACLE_HOLIDAY_SELL_MAX_AGE_SECONDS', 1)
+// Product owner approved temporary use of the online-reported 1-hour value
+// on 2026-09-28. This is not Chainlink-confirmed for Robinhood Chain.
+const provisionalNvdaHeartbeatSeconds = 3_600
+// Product owner approved these provisional policy bounds from supplied research.
+// They are not numeric recommendations published by Chainlink.
+const provisionalNvdaClosedSellMaxAgeSeconds = 259_200
+const provisionalNvdaHolidaySellMaxAgeSeconds = 345_600
+
 export const serverConfig = {
   host: process.env.HOST ?? '127.0.0.1',
   port: Number(process.env.PORT ?? 3001),
   rpcTimeoutMs: 5_000,
   zeroXApiKey: process.env.ZEROX_API_KEY?.trim() ?? '',
+  riskPolicy: {
+    // Set only to the exact feed-specific heartbeat confirmed by Chainlink.
+    // The approved freshness window is that heartbeat plus 60 seconds.
+    nvdaOracleHeartbeatSeconds: configuredNvdaHeartbeatSeconds ?? provisionalNvdaHeartbeatSeconds,
+    nvdaOracleHeartbeatProvisional: configuredNvdaHeartbeatSeconds === undefined,
+    nvdaOracleClosedSellMaxAgeSeconds: configuredClosedSellMaxAgeSeconds ?? provisionalNvdaClosedSellMaxAgeSeconds,
+    nvdaOracleClosedSellMaxAgeProvisional: configuredClosedSellMaxAgeSeconds === undefined,
+    nvdaOracleHolidaySellMaxAgeSeconds: configuredHolidaySellMaxAgeSeconds ?? provisionalNvdaHolidaySellMaxAgeSeconds,
+    nvdaOracleHolidaySellMaxAgeProvisional: configuredHolidaySellMaxAgeSeconds === undefined,
+    nvdaOracleMaxAgeSeconds: undefined as number | undefined,
+  },
 }
+serverConfig.riskPolicy.nvdaOracleMaxAgeSeconds = serverConfig.riskPolicy.nvdaOracleHeartbeatSeconds + 60
 
 if (!Number.isInteger(serverConfig.port) || serverConfig.port < 1 || serverConfig.port > 65_535) {
   throw new Error('PORT must be an integer between 1 and 65535')
