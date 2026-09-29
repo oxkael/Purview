@@ -92,7 +92,7 @@ Receipt
 - [~] "/api/health" — implemented; runtime response not yet verified
 - [~] "/api/integrations/status" — live endpoint verifies RPC, configured bytecode, market parameters, oracle diagnostics, and BlueBundlesV1 immutable dependencies; execution remains unverified
 - [x] "/api/portfolio?address=..." — live read verified for the supplied wallet on Robinhood Chain; see portfolio evidence below
-- [~] "POST /api/intent" — conservative documented-format parser implemented; runtime behavior not yet verified
+- [~] "POST /api/intent" — deterministic parser and Fastify route pass in-process tests; no live deployment check or AI provider integration
 - [~] "POST /api/plan" — a live blocked preflight response was demonstrated; SELL/BORROW/HYBRID candidate calculation and ranking are wired, but a live feasible candidate has not been validated; execution remains disabled
 - [ ] "/api/plan/:id/recheck"
 - [ ] "/api/execute"
@@ -100,15 +100,14 @@ Receipt
 
 ---
 
-4. Intent Parser
+4. Intent Parser / AI
 
-- [~] Natural-language request accepted for the documented USDG/NVDA pattern; runtime not yet verified
-- [~] Target asset parsed for USDG; runtime not yet verified
-- [~] Target amount parsed; runtime not yet verified
-- [~] Restricted asset parsed for NVDA; runtime not yet verified
-- [~] Maximum sell percentage parsed; runtime not yet verified
-- [~] Missing constraint returns a clarification; runtime not yet verified
-- [ ] Clarification returned
+- [x] Deterministic parser accepts the documented USDG/NVDA pattern (local parser and route tests)
+- [x] Target asset, target amount, restricted asset, and maximum sale percentage are parsed in local tests
+- [x] Missing constraint returns a clarification in local parser and route tests
+- [ ] AI provider selected and configured (product spec does not specify a provider)
+- [ ] Model-backed intent parsing with strict output validation
+- [ ] Model-generated plan and failure explanations, grounded only in backend results
 - [ ] Parser cannot directly execute transactions
 - [ ] Parser cannot override constraints
 - [ ] Invalid parser output rejected
@@ -270,7 +269,8 @@ Date:
 Contract
 
 - [ ] Contract implemented
-- [ ] Foundry project configured
+- [x] Foundry project configured (`contracts/foundry.toml`)
+- [~] Borrow policy primitive and two unit tests written; not compiled or run because `forge`/`solc` are unavailable in the current environment
 - [ ] OpenZeppelin dependencies verified
 - [ ] Router deployed locally
 - [ ] Router deployed to testnet
@@ -700,3 +700,22 @@ The fresh quotes show the 0.05% tier remains best at each usable size. Widening 
 - The plan's global oracle comparison now uses the approved 0.01-NVDA reference quote rather than a maximum-wallet-size quote. A large quote's price impact can no longer veto a valid smaller exact-size SELL/HYBRID quote by itself; those candidate sizes still undergo their own quote filters. A SELL-only route failure is no longer copied as a HYBRID route failure.
 - Live `POST /api/plan` response supplied by the user at block `75513514`: market session reported closed, wallet had no NVDA available for sale, hybrid sizing was correctly not assessed while closed, and there were zero candidates/rejections. This demonstrates the live blocked-preflight path only; it does not validate candidate ranking for a feasible wallet. Market liquidity was `6,547,459,053` raw USDG units, which is aggregate market liquidity rather than this wallet's borrowing capacity.
 - `npm.cmd run build` passed. `git diff --check` reported no whitespace errors. No tests were run in this step.
+
+### 2026-09-29: Planner snapshot consistency review
+
+- Reviewed the exact-input and hybrid candidate search against the deterministic planner tests; all 18 existing backend tests pass.
+- Fixed pinned exact-input quote validation to read the block timestamp at the same snapshot block as the quote and Chainlink round. Previously this path used the latest block timestamp, mixing states during oracle-age validation.
+- The planner remains diagnostic-only. A feasible live wallet candidate, historical quote access on the configured RPC, and the live execution path have not been validated. Hybrid binary search still relies on monotone feasibility and needs live-path validation.
+
+### 2026-09-29: Intent route validation
+
+- Added tests for supported intent parsing, missing-field clarification, unsupported assets, out-of-range sale limits, empty and oversized HTTP request text, and Fastify route status/body behavior.
+- `npm.cmd test` passed: TypeScript build succeeded and all 26 tests passed. Intent route tests use Fastify in-process injection and do not call RPC or represent a live server deployment.
+- The plan recheck route remains unimplemented. `backend.md` now records the prerequisite to define trusted plan storage, expiry, and confirmation binding; no persistence layer is configured, so no storage behavior was invented.
+
+### 2026-09-29: Foundry borrow-policy scaffold
+
+- Added `contracts/foundry.toml` and a Solidity policy primitive that derives the 37.5% operational LTV cap from the expected 62.5% market LLTV and reverts if a different live LLTV is supplied.
+- Added two Foundry unit tests for the expected derivation and fail-closed mismatch. They are written but not compiled or run: `forge`, `solc`, `anvil`, and `cast` are not available in the current environment.
+- This is not a borrow router and has no token, Morpho, Uniswap, RPC, wallet, or execution behavior. No external data is embedded as test fixture truth beyond the approved LLTV policy input.
+- Before implementing borrow execution, confirm transaction-level handling of the approved market-session gate. The Nasdaq calendar is read offchain; a caller-supplied open/closed flag would not be trustworthy. Also verify Foundry compilation/tests and the exact deployed Morpho authorization behavior.

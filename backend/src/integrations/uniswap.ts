@@ -290,7 +290,11 @@ export async function getMinimumUniswapNvdaInputForUsdg(targetOutRawText: string
     : { blockNumber: snapshotBlockNumber }
   const [chainId, block, round] = await Promise.all([
     client.getChainId(),
-    client.getBlock({ blockTag: 'latest' }),
+    // Keep age validation and reported timestamp on the same state as the
+    // quote when a planner supplies its portfolio snapshot block.
+    client.getBlock(requestedSnapshotBlockNumber === undefined
+      ? { blockTag: 'latest' }
+      : { blockNumber: snapshotBlockNumber }),
     client.readContract({ address: longbowNvdaUsdgFeed, abi: feedAbi, functionName: 'latestRoundData', ...stateRef }),
   ])
   if (chainId !== robinhoodMainnet.id) throw new Error(`Wrong RPC chain: expected ${robinhoodMainnet.id}, received ${chainId}.`)
