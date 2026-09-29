@@ -18,6 +18,10 @@ const morphoAbi = [
   { type: 'function', name: 'isAuthorized', stateMutability: 'view', inputs: [{ name: 'authorizer', type: 'address' }, { name: 'authorized', type: 'address' }], outputs: [{ name: 'isAuthorized', type: 'bool' }] },
 ] as const
 
+const marketOracleAbi = [{
+  type: 'function', name: 'price', stateMutability: 'view', inputs: [], outputs: [{ name: '', type: 'uint256' }],
+}] as const
+
 const irmAbi = [{
   type: 'function',
   name: 'borrowRateView',
@@ -68,7 +72,7 @@ export async function getPortfolio(address: Address) {
 
   const block = await client.getBlock({ blockNumber })
 
-  const [usdgBalance, usdgDecimals, nvdaBalance, nvdaDecimals, usdgAllowanceToMorpho, nvdaAllowanceToMorpho, nvdaAllowanceToBundles, bundleAuthorized, position, market] = await Promise.all([
+  const [usdgBalance, usdgDecimals, nvdaBalance, nvdaDecimals, usdgAllowanceToMorpho, nvdaAllowanceToMorpho, nvdaAllowanceToBundles, bundleAuthorized, position, market, marketOraclePrice] = await Promise.all([
     client.readContract({ address: configuredContracts.usdg, abi: erc20Abi, functionName: 'balanceOf', args: [address], blockNumber }),
     client.readContract({ address: configuredContracts.usdg, abi: erc20Abi, functionName: 'decimals', blockNumber }),
     client.readContract({ address: configuredContracts.nvda, abi: erc20Abi, functionName: 'balanceOf', args: [address], blockNumber }),
@@ -79,6 +83,7 @@ export async function getPortfolio(address: Address) {
     client.readContract({ address: configuredContracts.morphoBlue, abi: morphoAbi, functionName: 'isAuthorized', args: [address, configuredContracts.morphoBlueBundlesV1], blockNumber }),
     client.readContract({ address: configuredContracts.morphoBlue, abi: morphoAbi, functionName: 'position', args: [longbowNvdaUsdgMarket.id, address], blockNumber }),
     client.readContract({ address: configuredContracts.morphoBlue, abi: morphoAbi, functionName: 'market', args: [longbowNvdaUsdgMarket.id], blockNumber }),
+    client.readContract({ address: longbowNvdaUsdgMarket.oracle, abi: marketOracleAbi, functionName: 'price', blockNumber }),
   ])
 
   const marketLastUpdate = market[4]
@@ -148,6 +153,7 @@ export async function getPortfolio(address: Address) {
       marketBorrowSharesRaw: marketTotalBorrowShares.toString(),
       lastAccrualTimestamp: marketLastUpdate.toString(),
       marketFeeWad: market[5].toString(),
+      marketOraclePriceRaw: marketOraclePrice.toString(),
       note: 'Debt assets are calculated from the live Morpho market and IRM state at the reported block using Morpho Blue interest accrual and round-up share conversion. Values remain raw loan-token units; no USD valuation is reported.',
     },
   }

@@ -2,11 +2,29 @@ import type { Address } from 'viem'
 import type { StructuredIntent } from './intent.js'
 import { getIntegrationStatus } from './integrations/status.js'
 import { getPortfolio } from './integrations/portfolio.js'
-import { getUniswapNvdaToUsdgQuotes } from './integrations/uniswap.js'
+import { getMinimumHybridNvdaSaleQuotes, getMinimumUniswapNvdaInputForUsdg, getUniswapNvdaToUsdgQuotes } from './integrations/uniswap.js'
 import { getNasdaqMarketSessionStatus } from './integrations/nasdaqCalendar.js'
 import { serverConfig } from './config.js'
+import { calculateSwapExecutionCost, generateCandidates, maxPermittedSaleRaw, selectPlans, type SellQuoteOption } from './plannerMath.js'
 
 type Blocker = { code: string; detail: string }
+
+function usdAmountToRawCeil(amount: number, decimals: number): bigint {
+  if (!Number.isFinite(amount) || amount <= 0) throw new Error('Target amount must be a positive finite number.')
+  const [mantissa = '', exponentText] = amount.toString().toLowerCase().split('e')
+  const exponent = exponentText === undefined ? 0 : Number(exponentText)
+  const [whole = '0', fraction = ''] = mantissa.split('.')
+  const digits = `${whole}${fraction}`.replace(/^0+(?=\d)/, '')
+  const shiftedDecimalPosition = whole.length + exponent + decimals
+  if (!Number.isSafeInteger(shiftedDecimalPosition) || shiftedDecimalPosition > 78) throw new Error('Target amount exceeds supported USDG precision.')
+  if (shiftedDecimalPosition <= 0) return digits.length > 0 && /[1-9]/.test(digits) ? 1n : 0n
+  const rawDigits = shiftedDecimalPosition >= digits.length
+    ? digits + '0'.repeat(shiftedDecimalPosition - digits.length)
+    : digits.slice(0, shiftedDecimalPosition)
+  const discarded = shiftedDecimalPosition < digits.length ? digits.slice(shiftedDecimalPosition) : ''
+  const raw = BigInt(rawDigits || '0')
+  return raw + (/[1-9]/.test(discarded) ? 1n : 0n)
+}
 
 export async function getReadOnlyPlanPreflight(address: Address, intent: StructuredIntent) {
   const [portfolio, integrationStatus, marketSession] = await Promise.all([
@@ -20,13 +38,37 @@ export async function getReadOnlyPlanPreflight(address: Address, intent: Structu
   ])
 
   const sellBps = Math.floor(intent.maxSellPercentage * 100)
-  const maxSellAmountRaw = BigInt(portfolio.balances.nvda.raw) * BigInt(sellBps) / 10_000n
-  const quoteAmountRaw = maxSellAmountRaw > 0n ? maxSellAmountRaw : 10_000_000_000_000_000n
+  const walletNvdaRaw = BigInt(portfolio.balances.nvda.raw)
+  const depositedNvdaRaw = BigInt(portfolio.longbowNvdaUsdg.collateralRaw)
+  const maxSellAmountRaw = maxPermittedSaleRaw(walletNvdaRaw, depositedNvdaRaw, BigInt(sellBps))
+  // Use the approved small reference size for the global oracle comparison.
+  // A maximum-wallet-size quote can fail from price impact even when the
+  // smaller exact candidate quote is valid; SELL/HYBRID sizing checks their
+  // own exact amounts independently below.
+  const quoteAmountRaw = 10_000_000_000_000_000n
   const uniswapQuote = await getUniswapNvdaToUsdgQuotes(quoteAmountRaw.toString()).catch((error: unknown) => ({
     status: 'blocked' as const,
     executable: false as const,
     detail: error instanceof Error ? error.message : 'Uniswap V3 quote unavailable.',
   }))
+  const targetUsdgRaw = usdAmountToRawCeil(intent.targetAmount, portfolio.balances.usdg.decimals)
+  const minimumSaleQuote = maxSellAmountRaw > 0n
+    ? await getMinimumUniswapNvdaInputForUsdg(
+        targetUsdgRaw.toString(), maxSellAmountRaw.toString(), BigInt(portfolio.blockNumber),
+      ).catch((error: unknown) => ({
+        status: 'unavailable' as const,
+        reason: 'QUOTE_OR_RPC_ERROR' as const,
+        detail: error instanceof Error ? error.message : 'Exact-input quote search failed.',
+        blockNumber: portfolio.blockNumber,
+      }))
+    : {
+        status: 'unavailable' as const,
+        reason: 'NO_WALLET_NVDA' as const,
+        targetOutRaw: targetUsdgRaw.toString(),
+        maximumInRaw: '0',
+        selected: null,
+        pools: [],
+      }
 
   if (integrationStatus.network.rpc.status !== 'available') {
     throw new Error(integrationStatus.network.rpc.detail ?? 'Robinhood Chain RPC is unavailable.')
@@ -120,8 +162,10 @@ export async function getReadOnlyPlanPreflight(address: Address, intent: Structu
   // Morpho Blue oracle prices use 1e36 scaling. Loan assets are USDG raw units
   // and collateral is NVDA raw units; the market oracle converts between them.
   // These are current-position diagnostics, not a proposed plan.
-  const marketOraclePriceRaw = 'priceRaw' in oracle && oracle.priceRaw
-    ? BigInt(oracle.priceRaw)
+  const snapshotMarketOraclePriceRaw = BigInt(portfolio.longbowNvdaUsdg.marketOraclePriceRaw)
+  const marketOraclePriceRaw = market.status === 'available' && oracle.status === 'available'
+    && snapshotMarketOraclePriceRaw > 0n
+    ? snapshotMarketOraclePriceRaw
     : undefined
   const collateralRaw = BigInt(portfolio.longbowNvdaUsdg.collateralRaw)
   const debtRaw = BigInt(portfolio.longbowNvdaUsdg.debtAssetsRaw)
@@ -138,7 +182,7 @@ export async function getReadOnlyPlanPreflight(address: Address, intent: Structu
     : undefined
   const currentPositionRisk = {
     status: currentLtvWad !== undefined && liquidationBufferBps !== undefined ? 'calculated' as const : 'unavailable' as const,
-    source: 'Live Morpho position, accrued debt, verified market LLTV, and market oracle price at this preflight read.',
+    source: 'Live Morpho position, accrued debt, verified market LLTV, and Morpho oracle price read at the portfolio block snapshot.',
     collateralValueUsdgRaw: collateralValueUsdgRaw?.toString() ?? null,
     debtUsdgRaw: debtRaw.toString(),
     currentLtvWad: currentLtvWad?.toString() ?? null,
@@ -234,9 +278,160 @@ export async function getReadOnlyPlanPreflight(address: Address, intent: Structu
     borrow: { status: borrowBlockers.length === 0 ? 'not_assessed' as const : 'blocked' as const, blockers: borrowBlockers },
     sell: { status: sellBlockers.length === 0 ? 'not_assessed' as const : 'blocked' as const, blockers: sellBlockers },
     hybrid: {
-      status: borrowBlockers.length === 0 && sellBlockers.length === 0 ? 'not_assessed' as const : 'blocked' as const,
-      blockers: [...borrowBlockers, ...sellBlockers],
+      status: borrowBlockers.length === 0 && sellBlockers.every((blocker) => blocker.code === 'SELL_ROUTE_UNAVAILABLE')
+        ? 'not_assessed' as const : 'blocked' as const,
+      blockers: [...borrowBlockers, ...sellBlockers.filter((blocker) => blocker.code !== 'SELL_ROUTE_UNAVAILABLE')],
     },
+  }
+
+  // Candidate math uses only portfolio/market data from one block and exact
+  // QuoterV2 results. It deliberately does not make jurisdiction or execution
+  // gates disappear; those remain in `blockers` and `executable` stays false.
+  let planAnalysis: Record<string, unknown>
+  try {
+    if (verifiedMarketLltvWad === undefined) throw new Error('Verified on-chain Morpho LLTV is unavailable.')
+    const morphoOraclePriceRaw = BigInt(portfolio.longbowNvdaUsdg.marketOraclePriceRaw)
+    const existingDebtRaw = BigInt(portfolio.longbowNvdaUsdg.debtAssetsRaw)
+    const availableBorrowLiquidityRaw = BigInt(portfolio.longbowNvdaUsdg.marketSupplyAssetsRaw)
+      - BigInt(portfolio.longbowNvdaUsdg.marketBorrowAssetsRaw)
+      - BigInt(portfolio.longbowNvdaUsdg.accruedInterestRaw)
+    const conservativeLiquidityRaw = availableBorrowLiquidityRaw > 0n ? availableBorrowLiquidityRaw : 0n
+    // A verified open Nasdaq session is required before borrow-based candidates
+    // can be considered. Closed/unknown sessions retain SELL diagnostics only.
+    const borrowingPermittedBySession = marketSession.status === 'open'
+    const borrowLiquidityForCandidates = borrowingPermittedBySession ? conservativeLiquidityRaw : 0n
+    const sellOptions: SellQuoteOption[] = []
+    if (minimumSaleQuote.status === 'quoted') {
+      for (const pool of minimumSaleQuote.pools) {
+        if (!('status' in pool) || pool.status !== 'quoted' || !('amountInRaw' in pool) || !('amountOutRaw' in pool)) continue
+        const amountInRaw = BigInt(pool.amountInRaw)
+        const amountOutRaw = BigInt(pool.amountOutRaw)
+        const feeTierPpm = BigInt(pool.fee)
+        const cost = calculateSwapExecutionCost({ amountInNvdaRaw: amountInRaw, quotedOutUsdgRaw: amountOutRaw, morphoOraclePriceRaw, feeTierPpm })
+        sellOptions.push({
+          amountInRaw, amountOutRaw, swapFeeUsdgRaw: cost.swapFeeUsdgRaw,
+          priceImpactUsdgRaw: cost.priceImpactUsdgRaw, priceImpactBps: cost.priceImpactBps,
+          oracleDeviationBps: BigInt(pool.oracleDeviationBps), slippageBps: 100n, gasEstimateEth: null,
+        })
+      }
+    }
+
+    let hybridSizing: Awaited<ReturnType<typeof getMinimumHybridNvdaSaleQuotes>> | { status: 'not_assessed'; reason: string; pools: [] }
+    if (!borrowingPermittedBySession) {
+      hybridSizing = { status: 'not_assessed', reason: `Borrowing is disabled while Nasdaq session is ${marketSession.status}.`, pools: [] }
+    } else if (maxSellAmountRaw === 0n || conservativeLiquidityRaw === 0n) {
+      hybridSizing = { status: 'not_assessed', reason: maxSellAmountRaw === 0n ? 'No permitted wallet sale is available for hybrid sizing.' : 'Live Morpho market has no conservatively available loan-token liquidity.', pools: [] }
+    } else {
+      hybridSizing = await getMinimumHybridNvdaSaleQuotes({
+        targetOutRaw: targetUsdgRaw,
+        maximumSaleRaw: maxSellAmountRaw,
+        walletNvdaRaw,
+        existingCollateralNvdaRaw: depositedNvdaRaw,
+        existingDebtUsdgRaw: existingDebtRaw,
+        availableBorrowLiquidityRaw: conservativeLiquidityRaw,
+        marketLltvWad: verifiedMarketLltvWad,
+        marketOraclePriceRaw: morphoOraclePriceRaw,
+        snapshotBlockNumber: BigInt(portfolio.blockNumber),
+      }).catch((error: unknown) => ({
+        status: 'unavailable' as const,
+        reason: error instanceof Error ? error.message : 'Live hybrid quote sizing failed.',
+        pools: [],
+      }))
+    }
+
+    if ('pools' in hybridSizing) {
+      for (const pool of hybridSizing.pools) {
+        if (pool.status !== 'quoted' || !('amountInRaw' in pool) || !('amountOutRaw' in pool)) continue
+        const amountInRaw = BigInt(pool.amountInRaw)
+        const amountOutRaw = BigInt(pool.amountOutRaw)
+        const cost = calculateSwapExecutionCost({ amountInNvdaRaw: amountInRaw, quotedOutUsdgRaw: amountOutRaw, morphoOraclePriceRaw, feeTierPpm: BigInt(pool.fee) })
+        sellOptions.push({
+          amountInRaw, amountOutRaw, swapFeeUsdgRaw: cost.swapFeeUsdgRaw,
+          priceImpactUsdgRaw: cost.priceImpactUsdgRaw, priceImpactBps: cost.priceImpactBps,
+          oracleDeviationBps: BigInt(pool.oracleDeviationBps), slippageBps: 100n, gasEstimateEth: null,
+        })
+      }
+    }
+
+    const candidates = generateCandidates({
+      targetUsdgRaw, walletNvdaRaw, existingCollateralNvdaRaw: depositedNvdaRaw,
+      existingDebtUsdgRaw: existingDebtRaw, maxSaleRaw: maxSellAmountRaw,
+      availableBorrowLiquidityRaw: borrowLiquidityForCandidates,
+      marketLltvWad: verifiedMarketLltvWad, morphoOraclePriceRaw, sellQuotes: sellOptions,
+    })
+    const selection = selectPlans(candidates)
+    const serializeCandidate = (candidate: (typeof candidates)[number]) => ({
+      ...candidate,
+      soldNvdaRaw: candidate.soldNvdaRaw.toString(),
+      soldPercentageBps: candidate.soldPercentageBps.toString(),
+      remainingNvdaRaw: candidate.remainingNvdaRaw.toString(),
+      suppliedNvdaRaw: candidate.suppliedNvdaRaw.toString(),
+      borrowedUsdgRaw: candidate.borrowedUsdgRaw.toString(),
+      receivedUsdgRaw: candidate.receivedUsdgRaw.toString(),
+      collateralNvdaRaw: candidate.collateralNvdaRaw.toString(),
+      debtUsdgRaw: candidate.debtUsdgRaw.toString(),
+      collateralValueUsdgRaw: candidate.collateralValueUsdgRaw.toString(),
+      ltvWad: candidate.ltvWad.toString(),
+      liquidationBufferBps: candidate.liquidationBufferBps.toString(),
+      swapFeeUsdgRaw: candidate.swapFeeUsdgRaw.toString(),
+      priceImpactUsdgRaw: candidate.priceImpactUsdgRaw.toString(),
+      priceImpactBps: candidate.priceImpactBps.toString(),
+      slippageBps: candidate.slippageBps.toString(),
+      oracleDeviationBps: candidate.oracleDeviationBps?.toString() ?? null,
+      executionCostUsdgRaw: candidate.executionCostUsdgRaw.toString(),
+      totalCostUsdgRaw: candidate.totalCostUsdgRaw.toString(),
+    })
+    const planGateBlockers = (kind: 'SELL' | 'BORROW' | 'HYBRID') => kind === 'SELL'
+      ? sellBlockers
+      : kind === 'BORROW' ? borrowBlockers : [
+          ...borrowBlockers,
+          ...sellBlockers.filter((blocker) => blocker.code !== 'SELL_ROUTE_UNAVAILABLE'),
+          ...(hybridSizing.status === 'available' ? [] : [{
+            code: 'HYBRID_ROUTE_UNAVAILABLE',
+            detail: 'No allowlisted pool produced a hybrid quote that passed the configured amount, oracle, and reference checks.',
+          }]),
+        ]
+    const noCandidateReasons: Blocker[] = []
+    if (walletNvdaRaw === 0n) noCandidateReasons.push({
+      code: 'NO_WALLET_NVDA',
+      detail: 'The wallet has no NVDA available for a SELL leg. Deposited collateral is not treated as saleable wallet NVDA.',
+    })
+    if (marketSession.status !== 'open') noCandidateReasons.push({
+      code: 'BORROWING_DISABLED_FOR_SESSION',
+      detail: `BORROW and HYBRID require a verified open Nasdaq session; current status is ${marketSession.status}.`,
+    })
+    if (depositedNvdaRaw === 0n && walletNvdaRaw === 0n) noCandidateReasons.push({
+      code: 'NO_NVDA_COLLATERAL',
+      detail: 'The wallet has no NVDA balance or existing Morpho NVDA collateral to support a borrow.',
+    })
+    planAnalysis = {
+      status: selection.selected ? 'candidate_selected_but_gated' : candidates.length === 0 ? 'no_candidates_to_evaluate' : 'no_feasible_candidate',
+      reasons: selection.selected ? [] : noCandidateReasons,
+      selected: selection.selected ? serializeCandidate(selection.selected) : null,
+      saferAlternative: selection.saferAlternative ? serializeCandidate(selection.saferAlternative) : null,
+      candidates: candidates.map((candidate) => ({
+        ...serializeCandidate(candidate),
+        locallyFeasible: Object.values(candidate.constraints).every(Boolean),
+        blockers: planGateBlockers(candidate.kind),
+      })),
+      rejectedCount: selection.rejectedCount,
+      quoteSizing: { sell: minimumSaleQuote, hybrid: hybridSizing },
+      liquidity: {
+        marketSupplyAssetsRaw: portfolio.longbowNvdaUsdg.marketSupplyAssetsRaw,
+        marketBorrowAssetsRaw: portfolio.longbowNvdaUsdg.marketBorrowAssetsRaw,
+        accruedInterestRaw: portfolio.longbowNvdaUsdg.accruedInterestRaw,
+        conservativeAvailableRaw: conservativeLiquidityRaw.toString(),
+        detail: 'This is aggregate market liquidity, not this wallet’s borrowing capacity. Conservative raw USDG liquidity is total supply less total borrow assets and accrued market interest, all read at the portfolio block; collateral risk and market-session policy still limit any borrow.',
+      },
+      snapshot: { blockNumber: portfolio.blockNumber, marketOraclePriceRaw: morphoOraclePriceRaw.toString() },
+      detail: 'Candidate ranking is diagnostic. Every candidate remains blocked by its listed gates; no calldata, simulation, signing, or execution is performed.',
+    }
+  } catch (error) {
+    planAnalysis = {
+      status: 'unavailable', selected: null, candidates: [],
+      detail: error instanceof Error ? error.message : 'Live candidate analysis could not be completed.',
+      executable: false,
+    }
   }
 
   return {
@@ -264,6 +459,16 @@ export async function getReadOnlyPlanPreflight(address: Address, intent: Structu
       allowlistedFees: [100, 500, 3000],
       detail: 'Quotes are read-only. This preflight does not create router calldata or authorize a transaction.',
     },
+    sellOnlyMinimum: {
+      status: minimumSaleQuote.status,
+      targetUsdgRaw: targetUsdgRaw.toString(),
+      maximumSaleRaw: maxSellAmountRaw.toString(),
+      quote: minimumSaleQuote,
+      detail: minimumSaleQuote.status === 'quoted'
+        ? 'Minimum wallet NVDA input reaching the requested USDG output, searched per allowlisted pool at the portfolio read block and rechecked against the oracle and 0.01 NVDA reference. This is a sell-only diagnostic; plan ranking and execution are separate.'
+        : 'No validated minimum sell quote is available. Borrow and hybrid assessment are not represented by this sell-only result.',
+    },
+    planAnalysis,
     jurisdictionGate,
     chainLiveness,
     readAt: portfolio.readAt,
@@ -272,6 +477,8 @@ export async function getReadOnlyPlanPreflight(address: Address, intent: Structu
     wallet: {
       address: portfolio.address,
       balances: portfolio.balances,
+      totalNvdaHoldingsRaw: (walletNvdaRaw + depositedNvdaRaw).toString(),
+      maximumPermittedWalletSaleRaw: maxSellAmountRaw.toString(),
       longbowPosition: portfolio.longbowNvdaUsdg,
       approvals: portfolio.approvals,
     },
@@ -297,6 +504,6 @@ export async function getReadOnlyPlanPreflight(address: Address, intent: Structu
     },
     strategies,
     blockers,
-    note: 'This read-only preflight includes current-position risk diagnostics only. It does not yet calculate SELL, BORROW, or HYBRID candidate plans, build transaction calldata, simulate, sign, or execute.',
+    note: 'This read-only preflight ranks SELL/BORROW/HYBRID candidates from live wallet, Morpho, oracle, and exact Uniswap quotes at the reported block snapshot. Jurisdiction and other strategy blockers remain enforced; transaction calldata, simulation, signing, and execution are not exposed.',
   }
 }

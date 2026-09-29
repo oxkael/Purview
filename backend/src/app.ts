@@ -1,12 +1,12 @@
 import Fastify from 'fastify'
 import { getIntegrationStatus } from './integrations/status.js'
 import { getPortfolio } from './integrations/portfolio.js'
-import { getAddress } from 'viem'
+import { getAddress, parseUnits } from 'viem'
 import { getNvdaToUsdgPrice, getNvdaToUsdgQuote, parseTakerAddress, ZeroXError } from './integrations/zeroX.js'
 import { parseIntent } from './intent.js'
 import { getReadOnlyPlanPreflight } from './planner.js'
 import type { StructuredIntent } from './intent.js'
-import { getUniswapNvdaToUsdgQuotes } from './integrations/uniswap.js'
+import { getMinimumUniswapNvdaInputForUsdg, getUniswapNvdaToUsdgQuotes } from './integrations/uniswap.js'
 
 export function buildApp() {
   const app = Fastify({ logger: true })
@@ -131,6 +131,51 @@ export function buildApp() {
       return reply.code(502).send({
         error: 'QUOTE_UNAVAILABLE',
         detail: error instanceof Error ? error.message : 'Uniswap V3 quote could not be retrieved.',
+      })
+    }
+  })
+
+  app.get<{ Querystring: { targetUsdg?: string; maximumNvda?: string } }>('/api/uniswap/minimum-input/nvda-to-usdg', async (request, reply) => {
+    const { targetUsdg, maximumNvda } = request.query
+    const decimalPattern = /^(?:0|[1-9]\d*)(?:\.\d+)?$/
+    if (!targetUsdg || !maximumNvda || !decimalPattern.test(targetUsdg) || !decimalPattern.test(maximumNvda)) {
+      return reply.code(400).send({
+        error: 'INVALID_INTENT',
+        detail: 'Provide positive decimal targetUsdg and maximumNvda query values, for example targetUsdg=3000&maximumNvda=20.',
+      })
+    }
+
+    let targetOutRaw: bigint
+    let maximumInRaw: bigint
+    try {
+      targetOutRaw = parseUnits(targetUsdg, 6)
+      maximumInRaw = parseUnits(maximumNvda, 18)
+    } catch {
+      return reply.code(400).send({
+        error: 'INVALID_INTENT',
+        detail: 'USDG supports at most 6 decimal places and NVDA at most 18 decimal places.',
+      })
+    }
+    if (targetOutRaw <= 0n || maximumInRaw <= 0n || targetOutRaw >= 2n ** 256n || maximumInRaw >= 2n ** 256n) {
+      return reply.code(400).send({ error: 'INVALID_INTENT', detail: 'Target and maximum NVDA input must be positive uint256-sized token amounts.' })
+    }
+
+    try {
+      const quote = await getMinimumUniswapNvdaInputForUsdg(targetOutRaw.toString(), maximumInRaw.toString())
+      return reply.send({
+        ...quote,
+        executable: false,
+        diagnosticOnly: true,
+        walletOwnershipChecked: false,
+        maximumInputIsHypothetical: true,
+        disclaimer: 'This read-only quote does not check whether the wallet owns NVDA, does not create a plan, and cannot be executed. The supplied maximum is only a quote-search bound.',
+      })
+    } catch (error) {
+      request.log.error({ err: error }, 'Hypothetical Uniswap minimum-input quote failed')
+      return reply.code(502).send({
+        error: 'QUOTE_UNAVAILABLE',
+        detail: error instanceof Error ? error.message : 'Minimum-input quote could not be retrieved from Uniswap V3.',
+        executable: false,
       })
     }
   })

@@ -93,7 +93,7 @@ Receipt
 - [~] "/api/integrations/status" — live endpoint verifies RPC, configured bytecode, market parameters, oracle diagnostics, and BlueBundlesV1 immutable dependencies; execution remains unverified
 - [x] "/api/portfolio?address=..." — live read verified for the supplied wallet on Robinhood Chain; see portfolio evidence below
 - [~] "POST /api/intent" — conservative documented-format parser implemented; runtime behavior not yet verified
-- [~] "POST /api/plan" — read-only preflight implemented; live response not yet verified; no numerical plan or execution
+- [~] "POST /api/plan" — a live blocked preflight response was demonstrated; SELL/BORROW/HYBRID candidate calculation and ranking are wired, but a live feasible candidate has not been validated; execution remains disabled
 - [ ] "/api/plan/:id/recheck"
 - [ ] "/api/execute"
 - [ ] "/api/execution/:id"
@@ -210,30 +210,20 @@ Date: 2026-09-27
 
 9. Deterministic Planner
 
-- [ ] Sell candidate
-- [ ] Borrow candidate
-- [ ] Hybrid candidate
-- [ ] Amount sold calculated
-- [ ] Sell percentage calculated
-- [ ] Borrow amount calculated
-- [ ] Resulting LTV calculated
-- [ ] Liquidation buffer calculated
-- [ ] Expected USDG calculated
-- [ ] Fees calculated
-- [ ] Price impact calculated
-- [ ] Remaining exposure calculated
-- [ ] Execution cost calculated
+- [~] SELL/BORROW/HYBRID candidate generation is wired into `POST /api/plan`; one live response had zero candidates because the wallet had no saleable NVDA and the market was closed
+- [~] Candidate amounts, sale percentage, borrow amount, resulting LTV, liquidation buffer, expected USDG, fees, price impact, remaining exposure, and execution cost are calculated from live reads; no live feasible candidate has yet been ranked
 
 ---
 
 10. Hard Constraints
 
-- [ ] Maximum sell constraint
-- [ ] Minimum USDG output
-- [ ] Maximum LTV
-- [ ] Minimum liquidation buffer
-- [ ] Maximum slippage
-- [ ] Maximum execution cost
+- [~] Maximum sell constraint — implemented in candidate construction; live candidate validation pending
+- [~] Minimum USDG output — implemented in candidate construction; live candidate validation pending
+- [~] Maximum LTV — derived from verified LLTV and checked in candidate construction; live candidate validation pending
+- [~] Minimum liquidation buffer — checked in candidate construction; live candidate validation pending
+- [~] Maximum slippage — checked against the configured 1% cap; live candidate validation pending
+- [~] Maximum execution cost — checked against the configured 1.5% cap; live candidate validation pending
+- [~] Oracle-to-quote deviation — checked against the configured 2% cap; live candidate validation pending
 
 Test:
 
@@ -661,3 +651,52 @@ Official references: https://docs.robinhood.com/rhj/restricted-jurisdictions/ ; 
 - Removed fallback to expected LLTV when on-chain market verification is unavailable or mismatched. Risk math now requires verified live parameters.
 - TypeScript build passed with `npm.cmd run build`.
 - Candidate planning remains incomplete. Before implementing deterministic selection, product behavior needs definition for the objective among feasible plans and what HYBRID is allowed to do. Execution-cost USDG valuation also needs an authoritative gas-price/asset-price method or full-path simulation source.
+### 2026-09-28: Planner policy decisions and deterministic math
+
+- Recorded product decisions and rationale in `DECISIONS.md`; mirrored the approved planner rules in `backend.md`.
+- Added pure BigInt helpers for sale cap based on wallet plus deposited holdings, reducing sale capacity when wallet NVDA is supplied, whole-position LTV/buffer, runtime 60%-of-LLTV cap, hard-constraint filtering/ranking, safer alternative selection, separate ETH gas reporting, and gas funding eligibility. Candidate construction accepts exact quote inputs and does not estimate pool output by linear scaling.
+- Added deterministic node:test coverage for SELL/BORROW/HYBRID candidate generation, hard-constraint filtering, ranking, safer alternatives, sale accounting, no double counting, full position risk, derived LTV cap, the 40% buffer, 1.5% execution-cost threshold, slippage/oracle deviation, and gas funding.
+- The pure candidate engine is not yet wired into `/api/plan`; live exact-quote sizing and runtime candidate generation remain NEEDS REVIEW. There is no execute endpoint, simulation/final re-check, or receipt generation yet.
+- Final verification: `npm.cmd test` passed — TypeScript build succeeded; 13 tests passed, 0 failed. Earlier runs exposed fixture/edge-case failures; they were corrected before this clean run.
+- `git diff --check` completed with no whitespace errors.
+- Added `findMinimumExactInputForOutput`: bracketed integer search using exact quotes, followed by an adjacent-lower-input check. It returns an explicit target-unreachable result and propagates quote errors. It must run separately per allowlisted pool; do not search across a selector whose fee-tier eligibility changes with size.
+- Reverification after exact-input sizing tests: `npm.cmd test` passed — TypeScript build succeeded; 17 tests passed, 0 failed.
+- Connected exact minimum-input quote search to `POST /api/plan` as `sellOnlyMinimum`. It uses the portfolio's block number, verifies each allowlisted pool at that block, searches each fee tier independently with QuoterV2, confirms the adjacent lower input misses, then reapplies the 2% Chainlink and 1% 0.01-NVDA reference filters.
+- The search returns pool-level rejection/unavailable reasons and never substitutes a spot-price estimate for quote output. Quote errors fail closed. The selected amount is a sell-only diagnostic, not a selected SELL/BORROW/HYBRID plan.
+- Full candidate generation/ranking remains unwired to `/api/plan`; there is no transaction simulation or execution path.
+- Reverification after wiring: `npm.cmd test` passed — TypeScript build succeeded; 17 tests passed, 0 failed. The tests verify the search math and planner math using deterministic fixtures; live RPC/Quoter behavior has not been run in this environment.
+- `git diff --check` completed with no whitespace errors.
+- Added `GET /api/uniswap/minimum-input/nvda-to-usdg?targetUsdg=3000&maximumNvda=20` as a read-only hypothetical diagnostic. It requires no wallet or NVDA balance and explicitly returns `executable: false`, `diagnosticOnly: true`, and `walletOwnershipChecked: false`. The maximum input is only a user-supplied quote bound, never portfolio state.
+- Added a deterministic Fastify validation test confirming missing quote bounds are rejected before RPC work. A separate live diagnostic request in this environment was denied outbound access (`EACCES` to robinhood-rpc.publicnode.com), so no actual quote was obtained.
+- Final suite after the diagnostic route: `npm.cmd test` passed — TypeScript build succeeded; 18 tests passed, 0 failed. `git diff --check` reported no whitespace errors.
+
+### Fresh input-size comparison - live check (2026-09-29)
+
+Read-only GET /api/uniswap/quotes/nvda-to-usdg calls returned block 75490832 (timestamp 1790668239) on Robinhood Chain 4663. The common Chainlink answer was 230.55858116 USD/NVDA, age 821s; the 3,600s heartbeat remains provisional. Inputs were 0.01 NVDA, 13.02 NVDA (about $3,000 of NVDA input), and 43.40 NVDA (about $10,000 of NVDA input). This is separate from the minimum-input request for a 3,000 USDG output target.
+
+| Fee tier | NVDA input | USDG output | Effective price | Impact vs slot0 | Oracle deviation | Result under temporary 2% reference tolerance |
+|---:|---:|---:|---:|---:|---:|---|
+| 0.01% | 0.01 | 2.071671 | 207.1671 | 0.01% | -10.15% | Reject: oracle limit; larger sizes reach price limit |
+| 0.05% | 0.01 | 2.304009 | 230.4009 | 0.05% | -0.07% | Pass |
+| 0.30% | 0.01 | 2.292208 | 229.2208 | 0.30% | -0.58% | Pass; about 0.51% worse than 0.05% reference |
+| 0.01% | 13.02 | 82.296459 | 6.3208 | 96.95% | -97.26% | Reject: incomplete fill / price limit |
+| 0.05% | 13.02 | 2,999.734127 | 230.3943 | 0.05% | -0.07% | Pass; highest output |
+| 0.30% | 13.02 | 2,968.918050 | 228.0275 | 0.82% | -1.10% | Pass under 2% temporary reference tolerance; about 1.03% less output than 0.05% |
+| 0.01% | 43.40 | 82.296459 | 1.8962 | 99.08% | -99.18% | Reject: incomplete fill / price limit |
+| 0.05% | 43.40 | 9,998.440500 | 230.3788 | 0.06% | -0.08% | Pass; highest output |
+| 0.30% | 43.40 | 9,778.517358 | 225.3115 | 2.00% | -2.28% | Reject: exceeds unchanged 2% Chainlink deviation cap |
+
+The fresh quotes show the 0.05% tier remains best at each usable size. Widening the relative reference filter makes the 0.30% tier eligible for 0.01 and 13.02 NVDA, but it returns less USDG; at 43.40 NVDA it independently fails the hard 2% oracle-deviation limit. Quotes come from public pool state, not a Purview-specific quote account. At the same block and input, other callers query the same pools, subject to state changes and other swaps. No transaction was prepared or sent.
+
+### 2026-09-29: Live planner candidate calculation wired
+
+- `POST /api/plan` now builds and ranks SELL, BORROW, and HYBRID diagnostic candidates from the wallet portfolio and Morpho state, exact per-tier QuoterV2 minimum sale quotes, the live verified LLTV, and the Morpho market oracle price read at the portfolio block.
+- Added a same-block Morpho `price()` read to portfolio state. Borrow liquidity is conservatively reported as market supply assets less borrow assets and accrued interest; negative results clamp to zero.
+- HYBRID sizing searches each allowlisted pool using live exact-input quotes, checks the adjacent lower sale input, applies the Chainlink and temporary 2% reference filters, and calculates collateral needed under the 60%-of-LLTV cap. Closed or unverified market sessions suppress borrow-based candidate creation.
+- Candidate selection follows the recorded policy: least NVDA sold, then larger liquidation buffer, then lower valued swap cost. Each candidate includes hard-constraint results and relevant global blockers. Jurisdiction remains blocked, the response remains `executable: false`, and no calldata, signing, simulation, or transaction submission was added.
+- Important limits: candidate math has not yet been validated with a live `POST /api/plan` request. The quote path needs historical `eth_call` at the portfolio block; if the configured public RPC rejects it as archive state, quote sizing fails closed instead of mixing `latest` reads. HYBRID uses binary search with an adjacent-input check and assumes feasibility is monotone over the eligible quote range; validate this against live pool states before treating it as a proven global minimum.
+- Follow-up clarity: when no candidate can be constructed, `planAnalysis.status` now says `no_candidates_to_evaluate` and includes explicit causes such as no wallet NVDA, no Morpho collateral, or a closed/unverified Nasdaq session. Aggregate market liquidity is labeled as distinct from this wallet’s borrowing capacity.
+- Current-position risk also now uses the Morpho oracle `price()` read at the portfolio block, and stays unavailable unless both the market parameters and oracle integration are verified. This avoids combining an earlier portfolio snapshot with a separate latest oracle-price read.
+- The plan's global oracle comparison now uses the approved 0.01-NVDA reference quote rather than a maximum-wallet-size quote. A large quote's price impact can no longer veto a valid smaller exact-size SELL/HYBRID quote by itself; those candidate sizes still undergo their own quote filters. A SELL-only route failure is no longer copied as a HYBRID route failure.
+- Live `POST /api/plan` response supplied by the user at block `75513514`: market session reported closed, wallet had no NVDA available for sale, hybrid sizing was correctly not assessed while closed, and there were zero candidates/rejections. This demonstrates the live blocked-preflight path only; it does not validate candidate ranking for a feasible wallet. Market liquidity was `6,547,459,053` raw USDG units, which is aggregate market liquidity rather than this wallet's borrowing capacity.
+- `npm.cmd run build` passed. `git diff --check` reported no whitespace errors. No tests were run in this step.

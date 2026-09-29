@@ -53,6 +53,12 @@ export const uniswapV3 = {
   ],
 } as const
 
+// Temporary quote-quality tolerance approved by the product owner on
+// 2026-09-29: allow up to 2% worse effective price than the best eligible
+// 0.01 NVDA reference quote. Oracle deviation and execution slippage limits
+// remain unchanged.
+export const uniswapReferenceToleranceBps = 200n
+
 function optionalInteger(name: string, min: number, max = Number.MAX_SAFE_INTEGER): number | undefined {
   const raw = process.env[name]?.trim()
   if (!raw) return undefined

@@ -1,9 +1,13 @@
-import { createPublicClient, encodeFunctionData, formatUnits, http, type Address } from 'viem'
-import { configuredContracts, longbowNvdaUsdgFeed, robinhoodMainnet, serverConfig, uniswapV3 } from '../config.js'
+import { createPublicClient, encodeFunctionData, fallback, formatUnits, http, type Address } from 'viem'
+import { configuredContracts, longbowNvdaUsdgFeed, livenessRpcUrl, mainnetRpcUrl, robinhoodMainnet, serverConfig, uniswapReferenceToleranceBps, uniswapV3 } from '../config.js'
+import { findMinimumExactInputForOutput } from '../quoteSizing.js'
 
+const quoteRpcUrls = [...new Set([mainnetRpcUrl, livenessRpcUrl].filter(Boolean))]
 const client = createPublicClient({
   chain: robinhoodMainnet,
-  transport: http(undefined, { timeout: serverConfig.rpcTimeoutMs, retryCount: 0 }),
+  transport: quoteRpcUrls.length > 1
+    ? fallback(quoteRpcUrls.map((url) => http(url, { timeout: serverConfig.rpcTimeoutMs, retryCount: 0 })), { retryCount: 0 })
+    : http(mainnetRpcUrl, { timeout: serverConfig.rpcTimeoutMs, retryCount: 0 }),
 })
 
 const factoryAbi = [{
@@ -104,16 +108,17 @@ function isWithinOracleLimit(amountOut: bigint, amountIn: bigint, oracleAnswer: 
  * and reports oracle freshness as unassessed until the official feed policy
  * is configured.
  */
-export async function getUniswapNvdaToUsdgQuotes(amountInRawText: string) {
+export async function getUniswapNvdaToUsdgQuotes(amountInRawText: string, snapshotBlockNumber?: bigint) {
   if (!/^\d+$/.test(amountInRawText) || BigInt(amountInRawText) <= 0n) {
     throw new Error('amountInRaw must be a positive integer in NVDA base units.')
   }
   const amountIn = BigInt(amountInRawText)
-  const [chainId, blockNumber] = await Promise.all([client.getChainId(), client.getBlockNumber()])
+  const chainId = await client.getChainId()
+  const blockNumber = snapshotBlockNumber ?? await client.getBlockNumber()
   if (chainId !== robinhoodMainnet.id) throw new Error(`Wrong RPC chain: expected ${robinhoodMainnet.id}, received ${chainId}.`)
   const [block, round] = await Promise.all([
     client.getBlock({ blockNumber }),
-    client.readContract({ address: longbowNvdaUsdgFeed, abi: feedAbi, functionName: 'latestRoundData' }),
+    client.readContract({ address: longbowNvdaUsdgFeed, abi: feedAbi, functionName: 'latestRoundData', blockNumber }),
   ])
   const age = block.timestamp >= round.updatedAt ? block.timestamp - round.updatedAt : null
   const maxAge = serverConfig.riskPolicy.nvdaOracleMaxAgeSeconds
@@ -125,13 +130,13 @@ export async function getUniswapNvdaToUsdgQuotes(amountInRawText: string) {
 
   const candidates = await Promise.all(uniswapV3.nvdaUsdgPools.map(async ({ fee, address }) => {
     const [factory, token0, token1, actualFee, liquidity, slot0, factoryPool] = await Promise.all([
-      client.readContract({ address, abi: poolAbi, functionName: 'factory' }),
-      client.readContract({ address, abi: poolAbi, functionName: 'token0' }),
-      client.readContract({ address, abi: poolAbi, functionName: 'token1' }),
-      client.readContract({ address, abi: poolAbi, functionName: 'fee' }),
-      client.readContract({ address, abi: poolAbi, functionName: 'liquidity' }),
-      client.readContract({ address, abi: poolAbi, functionName: 'slot0' }),
-      client.readContract({ address: uniswapV3.factory, abi: factoryAbi, functionName: 'getPool', args: [configuredContracts.usdg, configuredContracts.nvda, fee] }),
+      client.readContract({ address, abi: poolAbi, functionName: 'factory', blockNumber }),
+      client.readContract({ address, abi: poolAbi, functionName: 'token0', blockNumber }),
+      client.readContract({ address, abi: poolAbi, functionName: 'token1', blockNumber }),
+      client.readContract({ address, abi: poolAbi, functionName: 'fee', blockNumber }),
+      client.readContract({ address, abi: poolAbi, functionName: 'liquidity', blockNumber }),
+      client.readContract({ address, abi: poolAbi, functionName: 'slot0', blockNumber }),
+      client.readContract({ address: uniswapV3.factory, abi: factoryAbi, functionName: 'getPool', args: [configuredContracts.usdg, configuredContracts.nvda, fee], blockNumber }),
     ])
     const poolIdentityValid = factory.toLowerCase() === uniswapV3.factory.toLowerCase()
       && factoryPool.toLowerCase() === address.toLowerCase()
@@ -146,6 +151,7 @@ export async function getUniswapNvdaToUsdgQuotes(amountInRawText: string) {
       abi: quoterAbi,
       functionName: 'quoteExactInputSingle',
       args: [{ tokenIn: configuredContracts.nvda, tokenOut: configuredContracts.usdg, amountIn, fee, sqrtPriceLimitX96: 0n }],
+      blockNumber,
     }) as readonly [bigint, bigint, number, bigint]
     const [amountOut, sqrtPriceX96After, initializedTicksCrossed, gasEstimate] = quoteResult
     const effectivePrice = Number(formatUnits(amountOut, 6)) / Number(formatUnits(amountIn, 18))
@@ -188,6 +194,7 @@ export async function getUniswapNvdaToUsdgQuotes(amountInRawText: string) {
       abi: quoterAbi,
       functionName: 'quoteExactInputSingle',
       args: [{ tokenIn: configuredContracts.nvda, tokenOut: configuredContracts.usdg, amountIn: referenceAmountIn, fee: candidate.fee, sqrtPriceLimitX96: 0n }],
+      blockNumber,
     }) as readonly [bigint, bigint, number, bigint]
     const [amountOut, sqrtPriceX96After] = referenceResult
     const price = Number(formatUnits(amountOut, 6)) / Number(formatUnits(referenceAmountIn, 18))
@@ -208,15 +215,15 @@ export async function getUniswapNvdaToUsdgQuotes(amountInRawText: string) {
   const filtered = candidates.map((candidate) => {
     if (!('amountOutRaw' in candidate) || !candidate.eligible || bestReference === null) return candidate
     const withinReference = bestReference !== null
-      && BigInt(candidate.amountOutRaw) * referenceAmountIn * 100n
-        >= bestReference.amountOut * amountIn * 99n
+      && BigInt(candidate.amountOutRaw) * referenceAmountIn * 10_000n
+        >= bestReference.amountOut * amountIn * (10_000n - uniswapReferenceToleranceBps)
     return {
       ...candidate,
-      withinOnePercentOfBestPrice: withinReference,
+      withinReferencePriceLimit: withinReference,
       eligible: withinReference,
       reason: withinReference ? null : bestReference === null
         ? 'No 0.01 NVDA reference quote passed the 2% Chainlink-deviation and complete-fill checks.'
-        : 'Effective price is more than 1% worse than the best eligible 0.01 NVDA reference quote.',
+        : 'Effective price is more than 2% worse than the best eligible 0.01 NVDA reference quote.',
     }
   })
   const eligibleQuotes = filtered.filter((candidate): candidate is typeof candidate & { amountOutRaw: string } =>
@@ -255,9 +262,338 @@ export async function getUniswapNvdaToUsdgQuotes(amountInRawText: string) {
     selection: selected ? { fee: selected.fee, pool: selected.pool, amountOutRaw: selected.amountOutRaw }
       : { fee: null, pool: null, amountOutRaw: null },
     detail: selected
-      ? 'Read-only quote selected after pool allowlist, exact-input usability, 2% oracle-deviation, and 1% comparison against the best eligible 0.01 NVDA reference. Oracle freshness still gates any execution plan.'
+      ? 'Read-only quote selected after pool allowlist, exact-input usability, 2% oracle-deviation, and the temporary 2% comparison against the best eligible 0.01 NVDA reference. Oracle freshness still gates any execution plan.'
       : 'No allowlisted pool produced a quote that passes the configured venue filters.',
   }
+}
+
+/**
+ * Find the least exact-input NVDA amount that reaches a USDG target on any
+ * allowlisted pool, pinned to one block. Every fee tier is searched separately
+ * because its exact-input output is monotonic; venue/oracle filters are checked
+ * again on each final minimum quote.
+ */
+export async function getMinimumUniswapNvdaInputForUsdg(targetOutRawText: string, maximumInRawText: string, requestedSnapshotBlockNumber?: bigint) {
+  if (!/^\d+$/.test(targetOutRawText) || BigInt(targetOutRawText) <= 0n) throw new Error('targetOutRaw must be a positive USDG base-unit integer.')
+  if (!/^\d+$/.test(maximumInRawText) || BigInt(maximumInRawText) <= 0n) throw new Error('maximumInRaw must be a positive NVDA base-unit integer.')
+  const targetOut = BigInt(targetOutRawText)
+  const maximumIn = BigInt(maximumInRawText)
+  // PublicNode's public endpoint can reject eth_call at an explicit block as
+  // an archive request, even when that block was just fetched. Keep actual
+  // planner calls pinned when a snapshot is supplied; the standalone
+  // hypothetical diagnostic uses the `latest` tag to remain usable on this
+  // non-archive endpoint.
+  const snapshotBlockNumber = requestedSnapshotBlockNumber ?? await client.getBlockNumber()
+  if (snapshotBlockNumber <= 0n) throw new Error('A positive snapshot block is required for exact-input sizing.')
+  const stateRef = requestedSnapshotBlockNumber === undefined
+    ? { blockTag: 'latest' as const }
+    : { blockNumber: snapshotBlockNumber }
+  const [chainId, block, round] = await Promise.all([
+    client.getChainId(),
+    client.getBlock({ blockTag: 'latest' }),
+    client.readContract({ address: longbowNvdaUsdgFeed, abi: feedAbi, functionName: 'latestRoundData', ...stateRef }),
+  ])
+  if (chainId !== robinhoodMainnet.id) throw new Error(`Wrong RPC chain: expected ${robinhoodMainnet.id}, received ${chainId}.`)
+  if (round.answer <= 0n || round.updatedAt === 0n || round.answeredInRound < round.roundId || block.timestamp < round.updatedAt) {
+    throw new Error('Chainlink round is invalid at the quote snapshot block.')
+  }
+
+  const poolStates = await Promise.all(uniswapV3.nvdaUsdgPools.map(async ({ fee, address }) => {
+    const [factory, token0, token1, actualFee, liquidity, registeredPool] = await Promise.all([
+      client.readContract({ address, abi: poolAbi, functionName: 'factory', ...stateRef }),
+      client.readContract({ address, abi: poolAbi, functionName: 'token0', ...stateRef }),
+      client.readContract({ address, abi: poolAbi, functionName: 'token1', ...stateRef }),
+      client.readContract({ address, abi: poolAbi, functionName: 'fee', ...stateRef }),
+      client.readContract({ address, abi: poolAbi, functionName: 'liquidity', ...stateRef }),
+      client.readContract({ address: uniswapV3.factory, abi: factoryAbi, functionName: 'getPool', args: [configuredContracts.usdg, configuredContracts.nvda, fee], ...stateRef }),
+    ])
+    const verified = factory.toLowerCase() === uniswapV3.factory.toLowerCase()
+      && token0.toLowerCase() === configuredContracts.usdg.toLowerCase()
+      && token1.toLowerCase() === configuredContracts.nvda.toLowerCase()
+      && actualFee === fee
+      && registeredPool.toLowerCase() === address.toLowerCase()
+    if (!verified) throw new Error(`Allowlisted Uniswap pool identity check failed for fee ${fee}.`)
+    return { fee, address, liquidity }
+  }))
+
+  const referenceAmountIn = 10_000_000_000_000_000n
+  const quotePool = async (fee: number, amountIn: bigint) => {
+    const result = await client.readContract({
+      address: uniswapV3.quoterV2,
+      abi: quoterAbi,
+      functionName: 'quoteExactInputSingle',
+      args: [{ tokenIn: configuredContracts.nvda, tokenOut: configuredContracts.usdg, amountIn, fee, sqrtPriceLimitX96: 0n }],
+      ...stateRef,
+    }) as readonly [bigint, bigint, number, bigint]
+    const [amountOut, sqrtPriceX96After, initializedTicksCrossed, gasEstimate] = result
+    return { amountOut, sqrtPriceX96After, initializedTicksCrossed, gasEstimate, usable: amountOut > 0n && sqrtPriceX96After < maxSqrtRatioMinusOne - 1n }
+  }
+
+  const references = await Promise.all(poolStates.map(async (pool) => {
+    if (pool.liquidity === 0n) return { ...pool, referenceOut: 0n, referenceValid: false }
+    const reference = await quotePool(pool.fee, referenceAmountIn)
+    const oraclePass = isWithinOracleLimit(reference.amountOut, referenceAmountIn, round.answer)
+    return { ...pool, referenceOut: reference.amountOut, referenceValid: reference.usable && oraclePass }
+  }))
+  const bestReference = references.reduce<(typeof references)[number] | null>((best, pool) => {
+    if (!pool.referenceValid) return best
+    return best === null || pool.referenceOut > best.referenceOut ? pool : best
+  }, null)
+  if (bestReference === null) {
+    return { status: 'unavailable' as const, reason: 'NO_VALID_001_REFERENCE', blockNumber: snapshotBlockNumber.toString(), pools: [] }
+  }
+
+  const searchedPools = await Promise.all(references.map(async (pool) => {
+    if (pool.liquidity === 0n || !pool.referenceValid) return {
+      fee: pool.fee, pool: pool.address, status: 'unavailable' as const,
+      reason: pool.liquidity === 0n ? 'ZERO_LIQUIDITY' as const : 'REFERENCE_ORACLE_REJECTED' as const,
+      probes: 0,
+    }
+    const sizing = await findMinimumExactInputForOutput({
+      targetAmountOutRaw: targetOut,
+      maximumAmountInRaw: maximumIn,
+      quoteExactInput: async (amountIn) => (await quotePool(pool.fee, amountIn)).amountOut,
+    })
+    if (sizing.status !== 'quoted') return {
+      fee: pool.fee, pool: pool.address, status: 'unavailable' as const,
+      reason: sizing.reason, maxProbe: sizing.maxProbe && {
+        amountInRaw: sizing.maxProbe.amountInRaw.toString(), amountOutRaw: sizing.maxProbe.amountOutRaw.toString(),
+      }, probes: sizing.probes,
+    }
+
+    const finalQuote = await quotePool(pool.fee, sizing.minimum.amountInRaw)
+    const oraclePass = isWithinOracleLimit(finalQuote.amountOut, sizing.minimum.amountInRaw, round.answer)
+    const oracleValueScaled = round.answer * sizing.minimum.amountInRaw
+    const oracleDeviationBps = Number((finalQuote.amountOut * 10n ** 20n - oracleValueScaled) * 10_000n / oracleValueScaled)
+    const withinReference = finalQuote.amountOut * referenceAmountIn * 10_000n
+      >= bestReference.referenceOut * sizing.minimum.amountInRaw * (10_000n - uniswapReferenceToleranceBps)
+    const eligible = finalQuote.usable && oraclePass && withinReference
+    return {
+      fee: pool.fee,
+      pool: pool.address,
+      status: eligible ? 'quoted' as const : 'rejected' as const,
+      reason: !finalQuote.usable ? 'INCOMPLETE_FILL' as const : !oraclePass ? 'ORACLE_DEVIATION' as const : !withinReference ? 'MORE_THAN_2_PERCENT_WORSE_THAN_REFERENCE' as const : null,
+      amountInRaw: sizing.minimum.amountInRaw.toString(),
+      amountOutRaw: finalQuote.amountOut.toString(),
+      oracleDeviationBps,
+      lowerProbe: sizing.lowerProbe && {
+        amountInRaw: sizing.lowerProbe.amountInRaw.toString(), amountOutRaw: sizing.lowerProbe.amountOutRaw.toString(),
+      },
+      oracleDeviationPass: oraclePass,
+      referencePricePass: withinReference,
+      gasEstimate: finalQuote.gasEstimate.toString(),
+      initializedTicksCrossed: finalQuote.initializedTicksCrossed,
+      probes: sizing.probes + 1,
+    }
+  }))
+
+  const eligible = searchedPools.filter((pool): pool is typeof pool & { status: 'quoted'; amountInRaw: string; amountOutRaw: string } =>
+    pool.status === 'quoted' && 'amountInRaw' in pool && 'amountOutRaw' in pool)
+  const selected = eligible.reduce<(typeof eligible)[number] | null>((best, pool) => {
+    if (!best) return pool
+    const smallerInput = BigInt(pool.amountInRaw) < BigInt(best.amountInRaw)
+    return smallerInput || (pool.amountInRaw === best.amountInRaw && BigInt(pool.amountOutRaw) > BigInt(best.amountOutRaw)) ? pool : best
+  }, null)
+  return {
+    status: selected ? 'quoted' as const : 'unavailable' as const,
+    reason: selected ? null : 'NO_POOL_REACHED_TARGET_WITH_ALL_VENUE_FILTERS',
+    blockNumber: snapshotBlockNumber.toString(),
+    blockTimestamp: block.timestamp.toString(),
+    targetOutRaw: targetOut.toString(),
+    maximumInRaw: maximumIn.toString(),
+    reference: { amountInRaw: referenceAmountIn.toString(), fee: bestReference.fee, amountOutRaw: bestReference.referenceOut.toString() },
+    selected: selected ? {
+      fee: selected.fee,
+      pool: selected.pool,
+      amountInRaw: selected.amountInRaw,
+      amountInNvda: formatUnits(BigInt(selected.amountInRaw), 18),
+      amountOutRaw: selected.amountOutRaw,
+      amountOutUsdg: formatUnits(BigInt(selected.amountOutRaw), 6),
+    } : null,
+    pools: searchedPools,
+    note: requestedSnapshotBlockNumber === undefined
+      ? 'This standalone hypothetical diagnostic used the RPC latest tag for each read because the configured public RPC rejects explicit block-state reads as archive requests. The chain can advance between probes, so this result is indicative and is not a transaction-ready minimum. Each pool was searched independently; the reported boundary, oracle check, and reference check may span different latest states.'
+      : 'Each pool was searched independently at the same block. The reported minimum is the adjacent-input boundary for that pool; oracle and 0.01 NVDA reference filters were rechecked at the resulting input.',
+  }
+}
+
+/**
+ * Find the least wallet NVDA sale that can be combined with a Morpho borrow to
+ * reach the target, while supplying enough of the unsold wallet NVDA to stay
+ * within the operational LTV cap. Every output comes from exact QuoterV2
+ * calls at the supplied portfolio block. This function only reads chain state.
+ */
+export async function getMinimumHybridNvdaSaleQuotes(input: {
+  targetOutRaw: bigint
+  maximumSaleRaw: bigint
+  walletNvdaRaw: bigint
+  existingCollateralNvdaRaw: bigint
+  existingDebtUsdgRaw: bigint
+  availableBorrowLiquidityRaw: bigint
+  marketLltvWad: bigint
+  marketOraclePriceRaw: bigint
+  snapshotBlockNumber: bigint
+}) {
+  const { targetOutRaw, maximumSaleRaw, walletNvdaRaw, existingCollateralNvdaRaw,
+    existingDebtUsdgRaw, availableBorrowLiquidityRaw, marketLltvWad,
+    marketOraclePriceRaw, snapshotBlockNumber } = input
+  if ([targetOutRaw, maximumSaleRaw, walletNvdaRaw, existingCollateralNvdaRaw,
+    existingDebtUsdgRaw, availableBorrowLiquidityRaw].some((value) => value < 0n)
+    || targetOutRaw === 0n || marketLltvWad <= 0n || marketOraclePriceRaw <= 0n
+    || snapshotBlockNumber <= 0n || maximumSaleRaw > walletNvdaRaw) {
+    throw new Error('Invalid live state supplied for hybrid quote sizing.')
+  }
+  if (maximumSaleRaw === 0n) return { status: 'unavailable' as const, reason: 'NO_PERMITTED_SALE', pools: [] }
+
+  const [chainId, block, round] = await Promise.all([
+    client.getChainId(),
+    client.getBlock({ blockNumber: snapshotBlockNumber }),
+    client.readContract({ address: longbowNvdaUsdgFeed, abi: feedAbi, functionName: 'latestRoundData', blockNumber: snapshotBlockNumber }),
+  ])
+  if (chainId !== robinhoodMainnet.id) throw new Error(`Wrong RPC chain: expected ${robinhoodMainnet.id}, received ${chainId}.`)
+  if (round.answer <= 0n || round.updatedAt === 0n || round.answeredInRound < round.roundId || block.timestamp < round.updatedAt) {
+    throw new Error('Chainlink round is invalid at the hybrid quote snapshot block.')
+  }
+
+  const referenceAmountIn = 10_000_000_000_000_000n
+  const verifiedPools = await Promise.all(uniswapV3.nvdaUsdgPools.map(async ({ fee, address }) => {
+    try {
+      const [factory, token0, token1, actualFee, liquidity, registeredPool] = await Promise.all([
+        client.readContract({ address, abi: poolAbi, functionName: 'factory', blockNumber: snapshotBlockNumber }),
+        client.readContract({ address, abi: poolAbi, functionName: 'token0', blockNumber: snapshotBlockNumber }),
+        client.readContract({ address, abi: poolAbi, functionName: 'token1', blockNumber: snapshotBlockNumber }),
+        client.readContract({ address, abi: poolAbi, functionName: 'fee', blockNumber: snapshotBlockNumber }),
+        client.readContract({ address, abi: poolAbi, functionName: 'liquidity', blockNumber: snapshotBlockNumber }),
+        client.readContract({ address: uniswapV3.factory, abi: factoryAbi, functionName: 'getPool', args: [configuredContracts.usdg, configuredContracts.nvda, fee], blockNumber: snapshotBlockNumber }),
+      ])
+      const valid = factory.toLowerCase() === uniswapV3.factory.toLowerCase()
+        && token0.toLowerCase() === configuredContracts.usdg.toLowerCase()
+        && token1.toLowerCase() === configuredContracts.nvda.toLowerCase()
+        && actualFee === fee && registeredPool.toLowerCase() === address.toLowerCase()
+      if (!valid) throw new Error('Allowlisted pool identity check failed.')
+      return { fee, address, liquidity, error: null as string | null }
+    } catch (error) {
+      return { fee, address, liquidity: 0n, error: error instanceof Error ? error.message : 'Pool verification failed.' }
+    }
+  }))
+
+  const quotePool = async (fee: number, amountIn: bigint) => {
+    const result = await client.readContract({
+      address: uniswapV3.quoterV2, abi: quoterAbi, functionName: 'quoteExactInputSingle',
+      args: [{ tokenIn: configuredContracts.nvda, tokenOut: configuredContracts.usdg, amountIn, fee, sqrtPriceLimitX96: 0n }],
+      blockNumber: snapshotBlockNumber,
+    }) as readonly [bigint, bigint, number, bigint]
+    const [amountOut, sqrtPriceX96After, initializedTicksCrossed, gasEstimate] = result
+    const usable = amountOut > 0n && sqrtPriceX96After < maxSqrtRatioMinusOne - 1n
+    return { amountOut, sqrtPriceX96After, initializedTicksCrossed, gasEstimate, usable }
+  }
+
+  const references = await Promise.all(verifiedPools.map(async (pool) => {
+    if (pool.error || pool.liquidity === 0n) return { ...pool, referenceOut: 0n, referenceValid: false }
+    try {
+      const reference = await quotePool(pool.fee, referenceAmountIn)
+      return { ...pool, referenceOut: reference.amountOut,
+        referenceValid: reference.usable && isWithinOracleLimit(reference.amountOut, referenceAmountIn, round.answer) }
+    } catch (error) {
+      return { ...pool, referenceOut: 0n, referenceValid: false,
+        error: error instanceof Error ? error.message : 'Reference quote failed.' }
+    }
+  }))
+  const bestReference = references.reduce<(typeof references)[number] | null>((best, pool) => {
+    if (!pool.referenceValid) return best
+    return best === null || pool.referenceOut > best.referenceOut ? pool : best
+  }, null)
+  if (bestReference === null) return { status: 'unavailable' as const, reason: 'NO_VALID_001_REFERENCE', pools: [] }
+
+  const WAD = 10n ** 18n
+  const PRICE_SCALE = 10n ** 36n
+  const ltvCap = marketLltvWad * 6_000n / 10_000n
+  const ceilDiv = (n: bigint, d: bigint) => n === 0n ? 0n : (n + d - 1n) / d
+  const evaluate = async (fee: number, amountIn: bigint) => {
+    // A zero-sale feasibility probe is purely a Morpho capacity calculation;
+    // QuoterV2 rejects zero exact-input amounts.
+    const quote = amountIn === 0n
+      ? { amountOut: 0n, sqrtPriceX96After: 0n, initializedTicksCrossed: 0, gasEstimate: 0n, usable: true }
+      : await quotePool(fee, amountIn)
+    const borrowed = targetOutRaw > quote.amountOut ? targetOutRaw - quote.amountOut : 0n
+    const remainingWalletNvda = walletNvdaRaw - amountIn
+    const totalCollateralValue = (existingCollateralNvdaRaw + remainingWalletNvda) * marketOraclePriceRaw / PRICE_SCALE
+    const maxDebtAtCap = totalCollateralValue * ltvCap / WAD
+    const borrowHeadroom = maxDebtAtCap > existingDebtUsdgRaw ? maxDebtAtCap - existingDebtUsdgRaw : 0n
+    const feasible = quote.usable && borrowed > 0n
+      && borrowed <= availableBorrowLiquidityRaw && borrowed <= borrowHeadroom
+    return { quote, borrowed, feasible }
+  }
+
+  const pools = await Promise.all(references.map(async (pool) => {
+    if (pool.error || pool.liquidity === 0n || !pool.referenceValid) return {
+      fee: pool.fee, pool: pool.address, status: 'unavailable' as const,
+      reason: pool.error ? 'POOL_OR_REFERENCE_UNAVAILABLE' : pool.liquidity === 0n ? 'ZERO_LIQUIDITY' : 'REFERENCE_ORACLE_REJECTED',
+      probes: 0,
+    }
+    try {
+      let low = 0n
+      let high = maximumSaleRaw
+      let highEval = await evaluate(pool.fee, high)
+      let probes = 1
+      if (!highEval.feasible) return {
+        fee: pool.fee, pool: pool.address, status: 'unavailable' as const,
+        reason: 'MAXIMUM_SALE_CANNOT_SUPPORT_TARGET_WITH_SAFE_BORROW', probes,
+      }
+      const zeroEval = await evaluate(pool.fee, 0n)
+      probes += 1
+      if (zeroEval.feasible) return {
+        fee: pool.fee, pool: pool.address, status: 'unavailable' as const,
+        reason: 'ZERO_SALE_BORROW_CANDIDATE_ALREADY_EXISTS', probes,
+      }
+      while (high - low > 1n) {
+        const mid = low + (high - low) / 2n
+        const midEval = await evaluate(pool.fee, mid)
+        probes += 1
+        if (midEval.feasible) {
+          high = mid
+          highEval = midEval
+        } else low = mid
+      }
+      const lowerEval = await evaluate(pool.fee, high - 1n)
+      probes += 1
+      if (lowerEval.feasible) throw new Error('Hybrid sizing invariant failed: adjacent lower sale remains feasible.')
+
+      const quote = highEval.quote
+      const oraclePass = isWithinOracleLimit(quote.amountOut, high, round.answer)
+      const withinReference = quote.amountOut * referenceAmountIn * 10_000n
+        >= bestReference.referenceOut * high * (10_000n - uniswapReferenceToleranceBps)
+      if (!oraclePass || !withinReference) return {
+        fee: pool.fee, pool: pool.address, status: 'rejected' as const,
+        reason: !oraclePass ? 'ORACLE_DEVIATION' : 'REFERENCE_PRICE_LIMIT', probes,
+      }
+      const quoteValueScaled = quote.amountOut * 10n ** 20n
+      const oracleValueScaled = round.answer * high
+      const deviationBps = Number((quoteValueScaled - oracleValueScaled) * 10_000n / oracleValueScaled)
+      const slot0 = await client.readContract({ address: pool.address, abi: poolAbi, functionName: 'slot0', blockNumber: snapshotBlockNumber })
+      const spotPrice = priceFromSqrtPriceX96(slot0.sqrtPriceX96)
+      const quotePrice = Number(formatUnits(quote.amountOut, 6)) / Number(formatUnits(high, 18))
+      const impactBps = Math.round((1 - quotePrice / spotPrice) * 10_000)
+      const existingValue = existingCollateralNvdaRaw * marketOraclePriceRaw / PRICE_SCALE
+      const requiredValue = ceilDiv((existingDebtUsdgRaw + highEval.borrowed) * WAD, ltvCap)
+      const additionalValue = requiredValue > existingValue ? requiredValue - existingValue : 0n
+      const suppliedNvdaRaw = ceilDiv(additionalValue * PRICE_SCALE, marketOraclePriceRaw)
+      return {
+        fee: pool.fee, pool: pool.address, status: 'quoted' as const,
+        amountInRaw: high.toString(), amountOutRaw: quote.amountOut.toString(),
+        borrowedUsdgRaw: highEval.borrowed.toString(), suppliedNvdaRaw: suppliedNvdaRaw.toString(),
+        lowerProbe: { amountInRaw: (high - 1n).toString(), amountOutRaw: lowerEval.quote.amountOut.toString() },
+        oracleDeviationBps: deviationBps, priceImpactBps: impactBps,
+        gasEstimateUnits: quote.gasEstimate.toString(), initializedTicksCrossed: quote.initializedTicksCrossed,
+        oracleDeviationPass: oraclePass, referencePricePass: withinReference, probes,
+      }
+    } catch (error) {
+      return { fee: pool.fee, pool: pool.address, status: 'unavailable' as const,
+        reason: error instanceof Error ? error.message : 'HYBRID_QUOTE_FAILED' }
+    }
+  }))
+  return { status: pools.some((pool) => pool.status === 'quoted') ? 'available' as const : 'unavailable' as const,
+    blockNumber: snapshotBlockNumber.toString(), blockTimestamp: block.timestamp.toString(), pools }
 }
 
 /** Build only the fixed, deadline-wrapped exact-input call; never submits it. */
