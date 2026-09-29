@@ -92,10 +92,35 @@ export async function getReadOnlyPlanPreflight(address: Address, intent: Structu
   borrowBlockers.push(jurisdictionBlocker)
   sellBlockers.push(jurisdictionBlocker)
 
+  const stockTokenRegistry = integrationStatus.integrations.robinhoodStockToken
+  if (stockTokenRegistry.status !== 'available') {
+    const registryBlocker = {
+      code: 'STOCK_TOKEN_REGISTRY_UNVERIFIED',
+      detail: stockTokenRegistry.detail ?? "Robinhood's official Stock Token registry did not verify the configured NVDA deployment as active.",
+    }
+    blockers.push(registryBlocker)
+    borrowBlockers.push(registryBlocker)
+    sellBlockers.push(registryBlocker)
+  }
+
+  const sellCapabilityStatus = stockTokenRegistry.status === 'available'
+    ? stockTokenRegistry.sellCapability.status
+    : 'unverified'
+  if (sellCapabilityStatus !== 'available') {
+    const tokenSessionGateBlocker = {
+      code: 'TOKEN_SESSION_CAPABILITY_UNVERIFIED',
+      detail: stockTokenRegistry.status === 'available'
+        ? stockTokenRegistry.sellCapability.detail
+        : 'Official NVDA session trading capabilities are not verified; SELL and HYBRID remain blocked.',
+    }
+    sellBlockers.push(tokenSessionGateBlocker)
+    blockers.push(tokenSessionGateBlocker)
+  }
+
   if (marketSession.status === 'unknown') {
     const marketSessionBlocker = {
       code: 'MARKET_SESSION_UNVERIFIED',
-      detail: `Nasdaq's official market calendar could not verify this session. ${marketSession.detail}`,
+      detail: `Official market calendar/session data could not verify this Robinhood trading session. ${marketSession.detail}`,
     }
     blockers.push(marketSessionBlocker)
     borrowBlockers.push(marketSessionBlocker)
@@ -296,7 +321,7 @@ export async function getReadOnlyPlanPreflight(address: Address, intent: Structu
       - BigInt(portfolio.longbowNvdaUsdg.marketBorrowAssetsRaw)
       - BigInt(portfolio.longbowNvdaUsdg.accruedInterestRaw)
     const conservativeLiquidityRaw = availableBorrowLiquidityRaw > 0n ? availableBorrowLiquidityRaw : 0n
-    // A verified open Nasdaq session is required before borrow-based candidates
+    // A verified active Robinhood 24/5 session is required before borrow-based candidates
     // can be considered. Closed/unknown sessions retain SELL diagnostics only.
     const borrowingPermittedBySession = marketSession.status === 'open'
     const borrowLiquidityForCandidates = borrowingPermittedBySession ? conservativeLiquidityRaw : 0n
@@ -309,7 +334,8 @@ export async function getReadOnlyPlanPreflight(address: Address, intent: Structu
         const feeTierPpm = BigInt(pool.fee)
         const cost = calculateSwapExecutionCost({ amountInNvdaRaw: amountInRaw, quotedOutUsdgRaw: amountOutRaw, morphoOraclePriceRaw, feeTierPpm })
         sellOptions.push({
-          amountInRaw, amountOutRaw, swapFeeUsdgRaw: cost.swapFeeUsdgRaw,
+          amountInRaw, amountOutRaw, fee: pool.fee, pool: pool.pool,
+          swapFeeUsdgRaw: cost.swapFeeUsdgRaw,
           priceImpactUsdgRaw: cost.priceImpactUsdgRaw, priceImpactBps: cost.priceImpactBps,
           oracleDeviationBps: BigInt(pool.oracleDeviationBps), slippageBps: 100n, gasEstimateEth: null,
         })
@@ -318,7 +344,7 @@ export async function getReadOnlyPlanPreflight(address: Address, intent: Structu
 
     let hybridSizing: Awaited<ReturnType<typeof getMinimumHybridNvdaSaleQuotes>> | { status: 'not_assessed'; reason: string; pools: [] }
     if (!borrowingPermittedBySession) {
-      hybridSizing = { status: 'not_assessed', reason: `Borrowing is disabled while Nasdaq session is ${marketSession.status}.`, pools: [] }
+      hybridSizing = { status: 'not_assessed', reason: `Borrowing is disabled while the Robinhood equity session is ${marketSession.status}.`, pools: [] }
     } else if (maxSellAmountRaw === 0n || conservativeLiquidityRaw === 0n) {
       hybridSizing = { status: 'not_assessed', reason: maxSellAmountRaw === 0n ? 'No permitted wallet sale is available for hybrid sizing.' : 'Live Morpho market has no conservatively available loan-token liquidity.', pools: [] }
     } else {
@@ -346,7 +372,8 @@ export async function getReadOnlyPlanPreflight(address: Address, intent: Structu
         const amountOutRaw = BigInt(pool.amountOutRaw)
         const cost = calculateSwapExecutionCost({ amountInNvdaRaw: amountInRaw, quotedOutUsdgRaw: amountOutRaw, morphoOraclePriceRaw, feeTierPpm: BigInt(pool.fee) })
         sellOptions.push({
-          amountInRaw, amountOutRaw, swapFeeUsdgRaw: cost.swapFeeUsdgRaw,
+          amountInRaw, amountOutRaw, fee: pool.fee, pool: pool.pool,
+          swapFeeUsdgRaw: cost.swapFeeUsdgRaw,
           priceImpactUsdgRaw: cost.priceImpactUsdgRaw, priceImpactBps: cost.priceImpactBps,
           oracleDeviationBps: BigInt(pool.oracleDeviationBps), slippageBps: 100n, gasEstimateEth: null,
         })
@@ -362,6 +389,8 @@ export async function getReadOnlyPlanPreflight(address: Address, intent: Structu
     const selection = selectPlans(candidates)
     const serializeCandidate = (candidate: (typeof candidates)[number]) => ({
       ...candidate,
+      targetUsdgRaw: candidate.targetUsdgRaw.toString(),
+      swapQuotedOutUsdgRaw: candidate.swapQuotedOutUsdgRaw.toString(),
       soldNvdaRaw: candidate.soldNvdaRaw.toString(),
       soldPercentageBps: candidate.soldPercentageBps.toString(),
       remainingNvdaRaw: candidate.remainingNvdaRaw.toString(),
@@ -398,7 +427,7 @@ export async function getReadOnlyPlanPreflight(address: Address, intent: Structu
     })
     if (marketSession.status !== 'open') noCandidateReasons.push({
       code: 'BORROWING_DISABLED_FOR_SESSION',
-      detail: `BORROW and HYBRID require a verified open Nasdaq session; current status is ${marketSession.status}.`,
+      detail: `BORROW and HYBRID require a verified active Robinhood equity session; current status is ${marketSession.status}.`,
     })
     if (depositedNvdaRaw === 0n && walletNvdaRaw === 0n) noCandidateReasons.push({
       code: 'NO_NVDA_COLLATERAL',
@@ -440,6 +469,7 @@ export async function getReadOnlyPlanPreflight(address: Address, intent: Structu
     intent,
     riskPolicy,
     marketSession,
+    robinhoodStockToken: stockTokenRegistry,
     oracleFreshnessForPlan: {
       mode: marketSession.status === 'closed' ? 'closed_market_sell_only' : marketSession.status,
       status: oracleFreshForMode ? 'within_limit' : 'blocked',

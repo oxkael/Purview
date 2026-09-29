@@ -6,6 +6,11 @@ export type PlanKind = 'SELL' | 'BORROW' | 'HYBRID'
 
 export type PlanCandidate = {
   kind: PlanKind
+  targetUsdgRaw: bigint
+  /** Exact Uniswap V3 route used by the live quote; null when no swap leg exists. */
+  swapFeeTier: number | null
+  swapPool: string | null
+  swapQuotedOutUsdgRaw: bigint
   soldNvdaRaw: bigint
   soldPercentageBps: bigint
   remainingNvdaRaw: bigint
@@ -38,6 +43,9 @@ export type PlanSelection = {
 export type SellQuoteOption = {
   amountInRaw: bigint
   amountOutRaw: bigint
+  /** Required on quotes created from live allowlisted pools. */
+  fee?: number
+  pool?: string
   swapFeeUsdgRaw: bigint
   priceImpactUsdgRaw: bigint
   priceImpactBps: bigint
@@ -193,6 +201,8 @@ export function generateCandidates(input: {
       oracleDeviationBps: quote.oracleDeviationBps,
       slippageBps: quote.slippageBps,
       gasEstimateEth: quote.gasEstimateEth,
+      swapFeeTier: quote.fee ?? null,
+      swapPool: quote.pool ?? null,
     }
     if (quote.amountOutRaw >= input.targetUsdgRaw) {
       candidates.push(makeCandidate({
@@ -238,6 +248,8 @@ export function makeCandidate(input: {
   oracleDeviationBps?: bigint | null
   slippageBps?: bigint
   gasEstimateEth?: string | null
+  swapFeeTier?: number | null
+  swapPool?: string | null
   totalNvdaHoldingsRaw?: bigint
 }): PlanCandidate {
   if (input.soldNvdaRaw + input.suppliedNvdaRaw > input.walletNvdaRaw) throw new Error('Wallet NVDA cannot be both sold and supplied as collateral.')
@@ -253,6 +265,10 @@ export function makeCandidate(input: {
   const oracleDeviationBps = input.oracleDeviationBps ?? null
   return {
     kind: input.kind,
+    targetUsdgRaw: input.targetUsdgRaw,
+    swapFeeTier: input.soldNvdaRaw > 0n ? input.swapFeeTier ?? null : null,
+    swapPool: input.soldNvdaRaw > 0n ? input.swapPool ?? null : null,
+    swapQuotedOutUsdgRaw: input.soldNvdaRaw > 0n ? input.swapReceivedUsdgRaw : 0n,
     soldNvdaRaw: input.soldNvdaRaw,
     soldPercentageBps: totalNvdaHoldingsRaw === 0n ? 0n : input.soldNvdaRaw * BPS / totalNvdaHoldingsRaw,
     remainingNvdaRaw: totalNvdaHoldingsRaw - input.soldNvdaRaw,

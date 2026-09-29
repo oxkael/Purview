@@ -1,12 +1,20 @@
 import Fastify from 'fastify'
 import { getIntegrationStatus } from './integrations/status.js'
 import { getPortfolio } from './integrations/portfolio.js'
-import { getAddress, parseUnits } from 'viem'
+import { createPublicClient, getAddress, http, parseUnits } from 'viem'
+import { privateKeyToAccount } from 'viem/accounts'
 import { getNvdaToUsdgPrice, getNvdaToUsdgQuote, parseTakerAddress, ZeroXError } from './integrations/zeroX.js'
 import { parseIntent } from './intent.js'
 import { getReadOnlyPlanPreflight } from './planner.js'
 import type { StructuredIntent } from './intent.js'
 import { getMinimumUniswapNvdaInputForUsdg, getUniswapNvdaToUsdgQuotes } from './integrations/uniswap.js'
+import { hashPlanCandidate, issuePlanReference, PlanReferenceError, verifyPlanReference } from './planReference.js'
+import { mainnetRpcUrl, robinhoodMainnet } from './config.js'
+import { buildExecutionCallTemplate } from './executionCallTemplate.js'
+
+const routerReadAbi = [
+  { type: 'function', name: 'executionSigner', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
+] as const
 
 export function buildApp() {
   const app = Fastify({ logger: true })
@@ -59,7 +67,27 @@ export function buildApp() {
 
     try {
       const preflight = await getReadOnlyPlanPreflight(getAddress(rawAddress), intent as StructuredIntent)
-      return reply.send(preflight)
+      const selected = (preflight.planAnalysis as { selected?: unknown } | undefined)?.selected
+      let planReference: { status: string; token?: string; expiresAt?: number; detail: string }
+      if (selected) {
+        try {
+          const issued = issuePlanReference({ address: getAddress(rawAddress), intent: intent as StructuredIntent, candidate: selected })
+          planReference = {
+            status: 'available',
+            token: issued.token,
+            expiresAt: issued.expiresAt,
+            detail: 'Short-lived integrity reference for rechecking this diagnostic candidate. It is not an execution authorization.',
+          }
+        } catch (error) {
+          planReference = {
+            status: 'unavailable',
+            detail: error instanceof PlanReferenceError ? error.message : 'Plan reference could not be issued.',
+          }
+        }
+      } else {
+        planReference = { status: 'not_available', detail: 'No selected candidate exists to bind for recheck.' }
+      }
+      return reply.send({ ...preflight, planReference })
     } catch (error) {
       request.log.error({ err: error }, 'Read-only plan preflight failed')
       return reply.code(503).send({
@@ -69,10 +97,153 @@ export function buildApp() {
     }
   })
 
+  app.post<{ Body: { planReference?: unknown; confirmed?: unknown } }>('/api/plan/recheck', async (request, reply) => {
+    const { planReference: rawPlanReference, confirmed } = request.body ?? {}
+    if (typeof rawPlanReference !== 'string' || rawPlanReference.length > 8_192) {
+      return reply.code(400).send({
+        error: 'INVALID_INTENT',
+        detail: 'Provide the short-lived planReference returned by POST /api/plan.',
+      })
+    }
+    if (confirmed !== true) {
+      return reply.code(400).send({
+        error: 'INVALID_INTENT',
+        detail: 'Set confirmed to true only after the user has reviewed the plan they intend to recheck.',
+      })
+    }
+
+    let reference
+    try {
+      reference = verifyPlanReference(rawPlanReference)
+    } catch (error) {
+      if (error instanceof PlanReferenceError) {
+        const statusCode = error.code === 'PLAN_REFERENCE_EXPIRED' ? 409
+          : error.code === 'PLAN_REFERENCE_SECRET_UNCONFIGURED' || error.code === 'PLAN_REFERENCE_SECRET_INVALID' ? 503
+            : 400
+        return reply.code(statusCode).send({ error: error.code, detail: error.message, executable: false })
+      }
+      return reply.code(400).send({ error: 'PLAN_REFERENCE_INVALID', detail: 'Plan reference could not be verified.', executable: false })
+    }
+
+    try {
+      const preflight = await getReadOnlyPlanPreflight(reference.address, reference.intent)
+      const selected = (preflight.planAnalysis as { selected?: unknown } | undefined)?.selected
+      if (!selected || hashPlanCandidate(selected) !== reference.candidateHash) {
+        return reply.code(409).send({
+          error: 'EXECUTION_BLOCKED',
+          status: 'stale_plan',
+          executable: false,
+          detail: 'The selected candidate changed or is no longer available after refreshing live state. Request and review a new plan.',
+          refreshedPlan: preflight,
+        })
+      }
+      let callTemplate: { status: 'template_only'; method: string; arguments: unknown; route: unknown } | { status: 'unavailable'; detail: string }
+      try {
+        const block = await createPublicClient({
+          chain: robinhoodMainnet,
+          transport: http(mainnetRpcUrl, { timeout: 5_000, retryCount: 0 }),
+        }).getBlock({ blockTag: 'latest' })
+        const freshness = preflight.oracleFreshnessForPlan as { maxAgeSeconds?: number | null } | undefined
+        const template = buildExecutionCallTemplate(selected, {
+          blockTimestamp: block.timestamp,
+          sellOracleMaxAgeSeconds: freshness?.maxAgeSeconds ?? null,
+        })
+        callTemplate = { status: 'template_only', ...template }
+      } catch (error) {
+        callTemplate = {
+          status: 'unavailable',
+          detail: error instanceof Error ? error.message : 'A fixed router-call template could not be prepared.',
+        }
+      }
+      return reply.send({
+        status: preflight.status,
+        executable: false,
+        unchanged: true,
+        executionPreparation: {
+          status: 'blocked',
+          callTemplate,
+          routerAddressConfigured: Boolean(process.env.PURVIEW_ROUTER_ADDRESS?.trim()),
+          signerConfigured: Boolean(process.env.PURVIEW_EXECUTION_SIGNER_PRIVATE_KEY?.trim()),
+          jurisdiction: 'blocked',
+          blockers: (preflight as { blockers?: unknown[] }).blockers ?? [],
+          detail: 'This fixed-method template is derived from the freshly rechecked candidate. It contains no calldata or signature; jurisdiction is blocked, and this endpoint cannot sign, simulate, or submit.',
+        },
+        refreshedPlan: preflight,
+      })
+    } catch (error) {
+      request.log.error({ err: error }, 'Confirmed plan recheck failed')
+      return reply.code(503).send({
+        error: 'EXECUTION_BLOCKED',
+        executable: false,
+        detail: error instanceof Error ? error.message : 'Fresh plan state could not be retrieved; execution remains blocked.',
+      })
+    }
+  })
+
   app.get('/api/integrations/status', async (_request, reply) => {
     const status = await getIntegrationStatus()
     const rpcAvailable = status.network.rpc.status === 'available'
     return reply.code(rpcAvailable ? 200 : 503).send(status)
+  })
+
+  app.get('/api/execution/readiness', async (request, reply) => {
+    const rawRouterAddress = process.env.PURVIEW_ROUTER_ADDRESS?.trim()
+    const rawSignerKey = process.env.PURVIEW_EXECUTION_SIGNER_PRIVATE_KEY?.trim()
+    const checks: Record<string, unknown> = {
+      routerAddress: rawRouterAddress
+        ? { status: /^0x[0-9a-fA-F]{40}$/.test(rawRouterAddress) ? 'configured' : 'invalid', address: /^0x[0-9a-fA-F]{40}$/.test(rawRouterAddress) ? getAddress(rawRouterAddress) : undefined }
+        : { status: 'not_configured', detail: 'PURVIEW_ROUTER_ADDRESS is not set.' },
+      signerKey: rawSignerKey ? { status: 'configured' } : { status: 'not_configured', detail: 'PURVIEW_EXECUTION_SIGNER_PRIVATE_KEY is not set.' },
+      jurisdiction: { status: 'blocked', detail: 'Jurisdiction eligibility is intentionally blocked until an approved policy and trusted access check are configured.' },
+      signing: { status: 'disabled', detail: 'This endpoint is read-only. It does not sign authorizations or submit transactions.' },
+    }
+
+    let derivedSigner: string | undefined
+    if (rawSignerKey) {
+      if (!/^0x[0-9a-fA-F]{64}$/.test(rawSignerKey)) {
+        checks.signerKey = { status: 'invalid', detail: 'Configured signer key has an invalid format.' }
+      } else {
+        try {
+          derivedSigner = privateKeyToAccount(rawSignerKey as `0x${string}`).address
+          checks.signerKey = { status: 'configured', address: derivedSigner }
+        } catch {
+          checks.signerKey = { status: 'invalid', detail: 'Configured signer key is not a valid secp256k1 private key.' }
+        }
+      }
+    }
+
+    if (!rawRouterAddress || !/^0x[0-9a-fA-F]{40}$/.test(rawRouterAddress)) {
+      checks.routerCode = { status: 'not_checked', detail: 'A valid PURVIEW_ROUTER_ADDRESS is required before checking deployment bytecode.' }
+      checks.signerMatch = { status: 'not_checked', detail: 'The deployed router signer cannot be compared until router bytecode is found.' }
+      return reply.send({ status: 'blocked', executable: false, expectedChainId: 4663, checks })
+    }
+
+    try {
+      const client = createPublicClient({ chain: robinhoodMainnet, transport: http(mainnetRpcUrl, { timeout: 5_000 }) })
+      const [chainId, code] = await Promise.all([client.getChainId(), client.getBytecode({ address: getAddress(rawRouterAddress) })])
+      checks.chain = { status: chainId === 4663 ? 'available' : 'wrong_chain', chainId }
+      if (chainId !== 4663) {
+        checks.routerCode = { status: 'not_checked', detail: 'Router bytecode is checked only on Robinhood Chain (4663).' }
+        checks.signerMatch = { status: 'not_checked', detail: 'The configured RPC does not report Robinhood Chain.' }
+        return reply.code(503).send({ status: 'unavailable', executable: false, expectedChainId: 4663, chainId, checks })
+      }
+      if (!code || code === '0x') {
+        checks.routerCode = { status: 'not_deployed', detail: 'No contract bytecode exists at PURVIEW_ROUTER_ADDRESS on Robinhood Chain.' }
+        checks.signerMatch = { status: 'not_checked', detail: 'The configured address has no router bytecode.' }
+      } else {
+        checks.routerCode = { status: 'deployed', codeBytes: (code.length - 2) / 2 }
+        const deployedSigner = await client.readContract({ address: getAddress(rawRouterAddress), abi: routerReadAbi, functionName: 'executionSigner' })
+        checks.signerMatch = derivedSigner
+          ? { status: deployedSigner.toLowerCase() === derivedSigner.toLowerCase() ? 'matched' : 'mismatch', deployedSigner, configuredSigner: derivedSigner }
+          : { status: 'signer_key_missing', deployedSigner, detail: 'Set the dedicated key locally only after verifying the router deployment.' }
+      }
+      return reply.send({ status: 'blocked', executable: false, expectedChainId: 4663, chainId, checks })
+    } catch (error) {
+      request.log.warn({ err: error }, 'Router execution-readiness RPC check failed')
+      checks.routerCode = { status: 'unavailable', detail: error instanceof Error ? error.message : 'Router deployment could not be checked.' }
+      checks.signerMatch = { status: 'not_checked', detail: 'Router deployment state is unavailable.' }
+      return reply.code(503).send({ status: 'unavailable', executable: false, expectedChainId: 4663, checks })
+    }
   })
 
   app.get<{ Querystring: { address?: string } }>('/api/portfolio', async (request, reply) => {

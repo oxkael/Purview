@@ -268,43 +268,50 @@ Date:
 
 Contract
 
-- [ ] Contract implemented
+- [~] Fixed-call hybrid router prototype compiled; 10/10 router tests and 2/2 policy tests passed against local mocks, including after adding the public execution-digest helper.
 - [x] Foundry project configured (`contracts/foundry.toml`)
-- [~] Borrow policy primitive and two unit tests written; not compiled or run because `forge`/`solc` are unavailable in the current environment
+- [x] Borrow policy primitive compiled; its two Foundry unit tests passed on the user's Windows environment (Solc 0.8.24, Forge 1.8.3; 2 passed, 0 failed)
 - [ ] OpenZeppelin dependencies verified
 - [ ] Router deployed locally
 - [ ] Router deployed to testnet
 
 Authorization
 
-- [ ] Caller authorization implemented
-- [ ] Recipient restrictions implemented
-- [ ] Target restrictions implemented
-- [ ] No unrestricted arbitrary execution
-- [ ] No unnecessary unrestricted delegatecall
+- [x] Caller authorization checks Morpho permission and backend execution signature
+- [x] Recipient is fixed to the calling wallet
+- [~] Targets are immutable per deployment and pool fee tiers are allowlisted; deployment configuration still needs independent verification
+- [x] No unrestricted arbitrary execution or caller-supplied calldata
+- [x] No delegatecall
+
+Backend signature handoff
+
+- [x] Router exposes the exact personal-sign digest through `executionDigest`
+- [x] Backend helper validates key format and matches its derived address to the supplied expected signer address
+- [ ] Dedicated signer secret configured locally
+- [ ] Helper connected to a confirmed, simulated, fully gated execution path (no signing API route currently exists)
 
 Parameters
 
-- [ ] "maxSellAmount"
-- [ ] "minOutputAmount"
-- [ ] "maxBorrowAmount"
-- [ ] "authorizedRecipient"
+- [x] `maxSellAmount`
+- [x] `minOutputAmount`
+- [x] `maxBorrowAmount`
+- [x] Authorized recipient enforced as `msg.sender`
 
 ---
 
 13. Router Security Tests
 
-- [ ] Valid swap succeeds
-- [ ] Valid borrow succeeds
-- [ ] Valid combined operation succeeds
-- [ ] Swap failure reverts
-- [ ] Borrow failure reverts
-- [ ] Maximum sell violation reverts
-- [ ] Minimum output violation reverts
-- [ ] Maximum borrow violation reverts
-- [ ] Unauthorized recipient rejected
-- [ ] Unauthorized target rejected
-- [ ] Relevant malformed parameters rejected
+- [x] Valid swap succeeds (mock)
+- [x] Valid borrow succeeds (mock)
+- [x] Valid combined operation succeeds (mock)
+- [x] Swap minimum-output failure reverts the combined operation (mock)
+- [x] Borrow failure reverts the combined operation (mock)
+- [x] Maximum sell violation reverts
+- [x] Minimum output violation reverts
+- [x] Maximum borrow violation reverts
+- [x] Recipient is not caller-selectable; always `msg.sender`
+- [x] Unallowlisted fee tier reverts
+- [x] Relevant malformed and unsafe oracle conditions revert
 
 ---
 
@@ -340,10 +347,10 @@ Hard constraint fails
 
 Evidence:
 
-Test:
-Transaction:
-Result:
-Date:
+- Test: user-reported `forge test -vv`, Forge 1.8.3 / Solc 0.8.24; 10 router tests + 2 policy tests passed
+- Transaction: local Foundry unit tests with mocked Morpho, Uniswap, token, and oracle contracts; no chain transaction
+- Result: mock-path combined success and full rollback after borrow, output-floor, and LTV failures demonstrated. This is local test atomicity only; live deployed-contract behavior remains untested.
+- Date: 2026-09-29
 
 Do not call the system atomic before this section contains real evidence.
 
@@ -711,11 +718,113 @@ The fresh quotes show the 0.05% tier remains best at each usable size. Widening 
 
 - Added tests for supported intent parsing, missing-field clarification, unsupported assets, out-of-range sale limits, empty and oversized HTTP request text, and Fastify route status/body behavior.
 - `npm.cmd test` passed: TypeScript build succeeded and all 26 tests passed. Intent route tests use Fastify in-process injection and do not call RPC or represent a live server deployment.
-- The plan recheck route remains unimplemented. `backend.md` now records the prerequisite to define trusted plan storage, expiry, and confirmation binding; no persistence layer is configured, so no storage behavior was invented.
+- At that point, the plan recheck route remained unimplemented because trusted storage, expiry, and confirmation binding had not been defined. It has since been implemented with a short-lived HMAC-protected stateless plan reference; see the later entry below.
 
 ### 2026-09-29: Foundry borrow-policy scaffold
 
 - Added `contracts/foundry.toml` and a Solidity policy primitive that derives the 37.5% operational LTV cap from the expected 62.5% market LLTV and reverts if a different live LLTV is supplied.
-- Added two Foundry unit tests for the expected derivation and fail-closed mismatch. They are written but not compiled or run: `forge`, `solc`, `anvil`, and `cast` are not available in the current environment.
+- Added two Foundry unit tests for the expected derivation and fail-closed mismatch. User ran `forge test -vv` on Windows: Solc 0.8.24 compiled 2 files; Forge 1.8.3 reported 2 passed, 0 failed, 0 skipped.
 - This is not a borrow router and has no token, Morpho, Uniswap, RPC, wallet, or execution behavior. No external data is embedded as test fixture truth beyond the approved LLTV policy input.
-- Before implementing borrow execution, confirm transaction-level handling of the approved market-session gate. The Nasdaq calendar is read offchain; a caller-supplied open/closed flag would not be trustworthy. Also verify Foundry compilation/tests and the exact deployed Morpho authorization behavior.
+- Before deploying borrow execution, implement the trusted backend signer that attests to all offchain gates. The Nasdaq calendar is read offchain; a caller-supplied open/closed flag would not be trustworthy. Also verify Foundry compilation/tests and exact deployed Morpho authorization behavior.
+
+### 2026-09-29: Fixed-call hybrid router prototype
+
+- Added `contracts/src/PurviewRouter.sol`: an NVDA-to-USDG exact-input Uniswap V3 swap, optional NVDA collateral supply, and Morpho borrow to the calling wallet in one reverting transaction. Fee tiers are restricted to the three configured pool addresses; recipients, target contracts, and calldata are not caller-selectable. A later uncompiled edit adds collateral-supply-only HYBRID with no swap; see the later status entry.
+- The router checks the chain ID, live market token pair and expected LLTV, user Morpho authorization, deadline (maximum 120 seconds), the provisional Chainlink age bound (maximum 3,660 seconds), `oraclePaused()`, 2% Chainlink/Morpho-oracle deviation, minimum swap output, max sell/borrow values, post-borrow 60%-of-LLTV risk, and a single-use signature over the exact plan.
+- Added mock-based Foundry tests for combined success, replay, sell cap, swap minimum output, borrow failure atomicity, stale oracle, operational-LTV failure, maximum borrow, Morpho authorization, unallowlisted fee, and paused oracle. User ran Forge 1.8.3 / Solc 0.8.24 after adding the public `executionDigest`: all 10 router tests and 2 policy tests passed. Tests use local mocks only, not deployed contracts.
+- The backend execution signer is not implemented/configured. It must attest to all offchain gates, including the approved market session and jurisdiction, before a router call is valid. Router deployment and execution remain blocked. The deployment configuration, OpenZeppelin safe-token dependency, real ABI behavior, testnet support, and independent security review remain unverified.
+
+### 2026-09-29: Backend execution-digest signing helper
+
+- Added `backend/src/executionSigner.ts`. It accepts a 32-byte router digest, requires `PURVIEW_EXECUTION_SIGNER_PRIVATE_KEY`, derives the signing account, checks it matches the expected signer address, and signs using the EIP-191 message format used by the router.
+- Added four tests for valid signature verification, missing key, signer mismatch, and malformed digest/key. `npm.cmd test` passed: TypeScript build succeeded and all 30 tests passed.
+- Added only a blank key name to `backend/.env.example`; the ignored `backend/.env` was not changed. No secret was created or requested. The helper is not exposed over HTTP and does not assess plans, query the router, or enforce session/jurisdiction/simulation gates. It must remain unwired until a verified execution path exists.
+
+### 2026-09-29: SELL / BORROW / HYBRID router paths
+
+- Added fixed-call `executeSell` and `executeBorrow` entry points alongside `executeHybrid`. All three bind their action and exact inputs to a distinct single-use backend authorization; no caller-selected targets or arbitrary calldata were added.
+- Applied the provisional oracle-age policy by action: BORROW/HYBRID are limited to 3,660 seconds; SELL accepts 3,660 seconds, 72 hours, or 96 hours, with the longer values intended only when the trusted signer has verified the closed-market session and any three-day holiday weekend. The contract checks price, round validity, `oraclePaused()`, and 2% deviation for each action.
+- User requested to defer tests. These edits have not been compiled or tested. The backend signer still does not validate session or plan safety and is not wired to the planner, so execution remains disabled. No deployment or live contract check was performed.
+- After those edits, the user reran the existing suite: Solc 0.8.24 compiled the router and 12 prior unit tests passed. Those tests still exercise the HYBRID mock path and LLTV policy; they do not exercise the new standalone SELL/BORROW methods or deployed contracts.
+- Added `contracts/test/PurviewRouterFork.t.sol` for read-only fork checks of the live market parameters, token decimals, Chainlink round, `oraclePaused()` call behavior, allowlisted 0.05% pool, and a QuoterV2 response. The test is skipped on non-fork runs and uses no private key, wallet funds, or broadcast transaction.
+- User ran the fork-only suite against `https://rpc.mainnet.chain.robinhood.com`: all 3 passed. This establishes current read/ABI compatibility for the configured market, tokens, feed, factory pool, and QuoterV2, plus successful local-fork router construction. It does not execute SELL/BORROW/HYBRID routes, test token transfer permissions, prove session/jurisdiction signing, or broadcast any transaction.
+- Expanded that fork suite with local-fork SELL, BORROW, and HYBRID call simulations against the live token, SwapRouter02, and Morpho contracts. User ran `forge test --fork-url https://rpc.mainnet.chain.robinhood.com --match-path test/PurviewRouterFork.t.sol -vv`: all 6 fork tests passed, including all 3 simulated execution paths. The test harness injects NVDA into its own ephemeral test account and grants Morpho authorization only on the local fork; this uses no real wallet or funds and is not proof of ordinary user/token eligibility or production signer gating. No transaction was broadcast.
+
+### 2026-09-29: Expiring plan recheck reference
+
+- Added an HMAC-protected, 120-second `planReference` that binds the wallet, structured intent, and selected candidate fingerprint. It requires `PURVIEW_PLAN_REFERENCE_SECRET` (at least 32 random bytes); without it the plan remains available but the recheck reference is reported unavailable.
+- Added `POST /api/plan/recheck`, which requires explicit `confirmed: true`, verifies the signed reference, reruns the live planner, and rejects a changed candidate as stale. It is read-only and always reports `executable: false`; it does not sign or submit a transaction. Jurisdiction and other execution gates remain in force.
+- `npm.cmd run build` passed after implementation. No tests were added or run in this step. The execution signer remains disconnected until its authorization is derived only from a freshly rechecked plan after every required gate passes.
+
+### 2026-09-29: Read-only router deployment readiness
+
+- Added `GET /api/execution/readiness` to check whether `PURVIEW_ROUTER_ADDRESS` is configured, has bytecode on Robinhood Chain (4663), and exposes an `executionSigner` that matches the optional locally configured signer key. It reports public signer addresses only; it never returns a private key, signs, or sends a transaction.
+- Added `PURVIEW_ROUTER_ADDRESS` to `backend/.env.example` and documented the diagnostic. Jurisdiction remains explicitly blocked and `executable` is always false; this endpoint is a deployment diagnostic, not an execution unlock.
+- Updated the contracts README to reflect the current signer helper and the user's successful six-test fork run, including the local-fork NVDA and Morpho-authorization limitations.
+- `npm.cmd run build` passed. No tests were run. No router address/key was added, no RPC readiness request was made, and no transaction was broadcast.
+
+### 2026-09-29: Router deployment preparation
+
+- Added `contracts/DEPLOYMENT.md` with the current constructor parameters, their recorded evidence/status, and pre-deployment gates. The current signer address is explicitly unresolved; the 96-hour max age is documented as provisional constructor policy, not a Chainlink-published feed parameter.
+- The document is preparation only. It does not add a broadcast script, ask for a private key, or imply deployment approval. It requires live address/market rechecks and independent review; jurisdiction remains blocked by the user's prior policy.
+- Linked the manifest from `contracts/README.md` and noted it in `backend.md`. No tests or on-chain calls were run. No private key or transaction was used.
+
+### 2026-09-29: Official Stock Token registry gate
+
+- Added a read-only integration for Robinhood's official `/rhj/assets` endpoint. It verifies the active NVDA registry entry and chain-4663 contract address against configured NVDA, returns the live session-capability fields, and reports that the origin response has no timestamp.
+- Added the canonical-asset check to planner blockers. BORROW uses the active canonical-token identity check and is not gated by swap-session capability. For SELL/HYBRID, the per-session map passes only when whole and fractional NVDA are `TRADING_STATUS_TRADABLE` in market, extended, and overnight sessions. Requiring all sessions avoids guessing the active off-hours session and blocks on missing/restricted values.
+- Official docs also describe a different capability schema. The parser recognizes it but does not infer session permissions from it; that schema remains blocked until its exact session meaning is verified. Unknown/missing capability data fails closed.
+- `npm.cmd run build` passed. Tests were not run. No private key, wallet funds, or transaction was used.
+- User's integration-status response at `2026-09-29T20:30:49Z` reported an active canonical NVDA registry entry at the expected address, with `TRADING_STATUS_TRADABLE` for whole and fractional amounts in market, extended, and overnight sessions. The response predates the new all-session evaluator; after restarting the backend, the same endpoint should include `sellCapability.status: available` for these reported values.
+- The same response showed a valid Chainlink round with age `9,243` seconds, beyond the provisional open-session limit of `3,660` seconds. The integration-status endpoint alone does not determine Nasdaq session status; the planner applies its closed-market SELL policy only when its independent calendar confirms the market is closed. 0x remains blocked; Uniswap remains the configured swap venue.
+- User reran the live integration-status endpoint at `2026-09-29T20:36:08Z`; it now reports `sellCapability.status: available` for the six `TRADING_STATUS_TRADABLE` values. Chainlink age was `9,561` seconds, still stale under the open-market limit but below the provisional 72-hour closed-market SELL cap. This endpoint does not include the Nasdaq calendar decision, wallet balance, plan candidate, jurisdiction, or router deployment status.
+
+### 2026-09-29: Preserve quote route provenance in planner candidates
+
+- The selected candidate previously retained swap amounts and costs but discarded the quoted Uniswap pool and fee tier. Added `swapPool`, `swapFeeTier`, and `swapQuotedOutUsdgRaw` to candidate data and serialize the exact values in plan responses. Live SELL and HYBRID quote conversion now carries those fields from the corresponding allowlisted-pool quote; BORROW and zero-sale HYBRID candidates report no swap route.
+- This closes a data handoff gap needed before a deterministic router-call builder can be prepared. It does not create calldata, calculate a transaction minimum, sign, simulate, or submit a transaction. Candidate output remains diagnostic and non-executable while jurisdiction, deployment, and other execution gates remain unresolved.
+- `npm.cmd run build` passed. Tests were not run. No transaction or live execution request was made.
+
+### 2026-09-29: Fixed router call parameter template
+
+- Added a strict parameter builder for the router's fixed SELL, BORROW, and HYBRID entry points. It accepts only a selected candidate whose deterministic constraints all pass, validates fee tier and pool address together against the configured Uniswap allowlist, and uses a 90-second deadline based on a fresh latest-block timestamp.
+- Swap minimum output now preserves the requested USDG target after the planned borrow while also respecting the maximum 1% slippage floor. BORROW caps its amount at the selected amount; SELL/HYBRID cap sale input at the exact selected amount. The `/api/plan/recheck` response can show these fixed method arguments only after its HMAC reference matches a fresh plan.
+- The result is explicitly `template_only`: no calldata or signature is created, jurisdiction remains blocked, and no transaction can be submitted. At this entry, a zero-sale HYBRID candidate could not be represented by the Solidity router; the follow-up entry below records the implementation of that missing fixed path.
+- `npm.cmd run build` passed. Tests were not run. No live recheck, wallet signing, or transaction was performed.
+
+### 2026-09-29: Collateral-supply-only HYBRID path
+
+- Extended `executeHybrid` to support a zero-swap operation only when `amountIn`, `maxSellAmount`, `minOutput`, and `fee` are all zero and a positive amount of new collateral and borrow are supplied. The same deadline, one-time backend authorization, Morpho permission, oracle checks, and operational LTV enforcement still apply; callers cannot select any target or arbitrary call data.
+- Updated the backend call-template builder to prepare those exact zero-swap arguments only for a matching HYBRID candidate. It rejects inconsistent route metadata and does not map the request to BORROW.
+- `npm.cmd run build` passed. Foundry compilation could not be completed in this environment: Forge 1.8.3 panicked while detecting the process user's home directory (`could not detect user home directory`). No tests were added or run. The Solidity edit therefore remains uncompiled and unverified; the user should compile and run the existing local router tests before considering it sound. No transaction was broadcast.
+- The user's subsequent Forge output showed lint warnings at the external protocol calls and no pasted compiler error/exit code. All three state-changing entry points carry the custom `nonReentrant` modifier, which sets `_entered = 2` before the function body; this should prevent reentry into those routes, but the warning has not been cleared by a dedicated test or security review. Swapped the LTV fixed-point multiplications to OpenZeppelin `Math.mulDiv` to avoid intermediate `uint256` overflow; this latest Solidity edit also remains uncompiled until Forge is rerun.
+- Replaced the handwritten reentrancy modifier with OpenZeppelin Contracts 5.x `ReentrancyGuard`, inherited by the router; all three state-changing entry points still use `nonReentrant`. This addresses the source guard implementation with the maintained library primitive. It does not prove that the static-analysis warning disappears or replace malicious-callback testing and review. The change is not yet compiled or tested.
+
+### 2026-09-29: Router lint annotations and atomicity test coverage
+
+- Added local Foundry lint suppressions for the approved timestamp and positive Chainlink-answer checks, each with a nearby rationale. Added comments for intentionally discarded Uniswap `multicall` results (the router checks the USDG balance delta), Morpho borrow shares, Chainlink `startedAt`, and unused Morpho market tuple fields. The answer positivity guard occurs before its uint cast.
+- Confirmed swap output validation in `executeHybrid` at lines 223-224 and `executeSell` at lines 292-293: each computes actual USDG received from the router's before/after balance and reverts if it is below `minOutput`.
+- All three execution entry points (`executeHybrid`, `executeSell`, `executeBorrow`) inherit OpenZeppelin `nonReentrant`. Added an explicit mocked swap-failure atomicity test to complement the existing success, borrow-failure, and hard-constraint cases required by backend.md §16.
+- Attempted `forge test -vv`; the local Foundry process in this environment panicked with `could not detect user home directory`, including when `HOME` and `USERPROFILE` were set. The test suite and lint suppressions therefore remain unverified here; run them from the user's local Foundry installation before treating this entry as passed.
+- Follow-up evidence supplied by the user: `forge build` compiled successfully, then `forge test --match-path test/PurviewRouter.t.sol -vv` passed all 11 tests, including `testSwapFailureRevertsWholeRoute` (0 failures). The pasted build output still contains block-timestamp warnings at earlier source line numbers (183/184/367/369/449/450) and the earlier unsafe cast/unused-return locations. Those locations do not match the current annotated source layout, so suppression status must be confirmed by rebuilding the current saved `PurviewRouter.sol`. The `reentrancy-events` warning also remains in the pasted output; guarded entry points are present, but the warning itself has not been suppressed.
+- After the user's subsequent build showed no timestamp warnings but retained `reentrancy-events` and `unused-return`, added narrowly scoped Foundry suppression directives beside those cases with reasons: ignored Uniswap return arrays are replaced by USDG balance-delta checks, unused Morpho shares/market fields do not feed router policy, Chainlink `startedAt` is not its freshness timestamp, and the post-success event is protected by all execution routes' OpenZeppelin reentrancy guard. These comment-only changes do not alter runtime behavior and still need a fresh user-side `forge build` to confirm the lint directives are accepted.
+- The user's next build confirmed every prior lint warning was cleared except `unused-return` on the second line of the Chainlink tuple assignment. Moved that directive to immediately precede the exact diagnosed call line; no behavior changed. Awaiting a fresh build confirmation.
+- The user then supplied two consecutive build outputs: the first retained that Chainlink warning; the second compiled one Solidity file successfully with no warnings. Together with the earlier user-reported 11/11 router unit tests, local mock atomicity coverage is demonstrated for the current functional code. Lint-only comment changes followed those tests and do not alter behavior.
+- The user's latest mainnet-fork trace for BORROW showed Chainlink answer `22817673628`, complete round `1134`, and `updatedAt=1790704599`. The test deadline was `1790719688` and is set to `block.timestamp + 60`, so the fork block timestamp was `1790719628`; feed age was therefore `15,029` seconds (~4h10m), exceeding BORROW/HYBRID's 3,660-second cap. `_checkOracle` reverted before reaching the token pause check. This is expected fail-closed behavior; the fork execution tests are time-sensitive and cannot assert successful borrow/hybrid when the feed is stale. No limit was loosened and no transaction was broadcast.
+- Updated the fork BORROW and HYBRID test cases to be state-aware: they assert the exact `OracleUnsafe()` revert when the live feed is stale/paused, and exercise the live borrow route only when the shared freshness preconditions pass. This preserves a genuine success test for fresh snapshots while verifying the current stale snapshot fails closed. The changed fork tests have not yet been compiled or run by the user.
+- After the user reported all six combined tests passing, noted that a passing combined test did not reveal whether BORROW/HYBRID succeeded or followed the expected stale-revert branch. Reworked the fork suite for explicit evidence: successful BORROW/HYBRID tests are skipped when the feed is unsafe; separate tests advance only the local fork timestamp and assert exact stale-oracle reverts. This makes test output distinguish unavailable fresh-feed execution from verified fail-closed behavior. The new fork tests require a fresh user-side run.
+- User ran the revised fork suite: compilation succeeded; 6 passed, 0 failed, 2 skipped. Both forced stale-oracle rejection checks passed; successful BORROW and HYBRID execution tests were skipped because the live feed was outside the 3,660-second limit. SELL still executed successfully on the local fork with the test harness's injected NVDA. No real transaction was broadcast. This does not count as a successful live-fork borrow or hybrid execution.
+- User ran the complete non-fork Foundry suite: `PurviewBorrowPolicyTest` 2/2 passed and `PurviewRouterTest` 11/11 passed. `PurviewRouterForkTest` was skipped by setup as expected without `--fork-url`. Together with the separately run fork suite above, the local contract unit tests pass and the live-fork stale-oracle behavior is verified; successful live-fork BORROW/HYBRID remain unverified until a fresh feed snapshot.
+
+### 2026-09-29: Distinguish Robinhood extended and overnight sessions
+
+- The planner classified every time outside Nasdaq regular hours (9:30 a.m.–4:00 p.m. ET) as closed. The status response at 20:36 UTC on 2026-09-29 corresponds to 4:36 p.m. Eastern, so a weekday after-hours request was mislabeled as a fully closed market. Robinhood's official session guidance includes pre-market, extended, and overnight trading for eligible assets; the NVDA registry response reported all three capabilities as tradable.
+- Updated the session evaluator to combine Nasdaq's holiday/early-close calendar with Robinhood's published 24/5 session windows. Active pre-market, regular, extended, and overnight periods now count as open for planner policy; weekend/holiday closure remains closed. Active-session oracle freshness still applies, so this change does not permit stale-price borrowing or hybrid plans.
+- `npm.cmd run build` passed. Tests were not run. The live plan endpoint was not re-queried after this change; the observed Chainlink age was still 9,561 seconds at the last status sample, above the provisional active-session limit of 3,660 seconds.
+
+### 2026-09-29: Independent router security review preparation
+
+- Added [`contracts/SECURITY_REVIEW.md`](contracts/SECURITY_REVIEW.md), a pre-review packet describing intended router invariants, evidence actually reported, unresolved security questions, and deployment blockers. It explicitly is not an audit or deployment approval.
+- Recorded the latest evidence accurately: 11 local router tests and 2 borrow-policy tests passed; latest fork run had 6 passes and 2 fresh BORROW/HYBRID success tests skipped because the live oracle was stale. No production transaction was sent.
+- Flagged unresolved feed-decimal validation, provisional oracle-age policy, off-chain signer/session/jurisdiction boundary, immutable constructor configuration, and missing gated backend signing flow for independent review.
+- Documentation-only change. No tests, on-chain calls, signing, or deployment were performed.

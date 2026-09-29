@@ -1,4 +1,5 @@
 const calendarUrl = 'https://www.nasdaq.com/market-activity/stock-market-holiday-schedule'
+const robinhoodHoursUrl = 'https://robinhood.com/us/en/support/articles/extendedhours-trading/'
 const cacheTtlMs = 6 * 60 * 60 * 1_000
 
 type HolidayRecord = { date: string; kind: 'closed' | 'early_close'; closeMinute?: number }
@@ -119,23 +120,48 @@ export async function getNasdaqMarketSessionStatus(now = new Date()) {
   const holidays = calendars.get(eastern.year)
   if (!holidays) throw new Error(`Nasdaq calendar does not publish a parsed ${eastern.year} schedule.`)
   const dateRecord = holidays.find((holiday) => holiday.date === eastern.date)
-  const weekend = eastern.weekdayIndex === 0 || eastern.weekdayIndex === 6
   const closeMinute = dateRecord?.kind === 'early_close' ? dateRecord.closeMinute ?? 13 * 60 : 16 * 60
-  const isMarketOpen = !weekend && dateRecord?.kind !== 'closed'
-    && eastern.minuteOfDay >= 9 * 60 + 30 && eastern.minuteOfDay < closeMinute
-  const status = isMarketOpen ? 'open' as const : 'closed' as const
+  const weekend = eastern.weekdayIndex === 0 || eastern.weekdayIndex === 6
+  let session: 'regular' | 'pre_market' | 'extended' | 'overnight' | 'closed' = 'closed'
+  if (dateRecord?.kind !== 'closed') {
+    if (eastern.weekdayIndex === 0) {
+      if (eastern.minuteOfDay >= 20 * 60) session = 'overnight'
+    } else if (eastern.weekdayIndex >= 1 && eastern.weekdayIndex <= 5) {
+      if (eastern.weekdayIndex === 5 && eastern.minuteOfDay >= 20 * 60) {
+        session = 'closed'
+      } else if (eastern.minuteOfDay < 7 * 60) {
+        session = 'overnight'
+      } else if (eastern.minuteOfDay < 9 * 60 + 30) {
+        session = 'pre_market'
+      } else if (eastern.minuteOfDay < closeMinute) {
+        session = 'regular'
+      } else {
+        const extendedClose = dateRecord?.kind === 'early_close' ? 17 * 60 : 20 * 60
+        if (eastern.minuteOfDay < extendedClose) session = 'extended'
+        else if (eastern.weekdayIndex < 5) session = 'overnight'
+      }
+    }
+  }
+  const status = session === 'closed' ? 'closed' as const : 'open' as const
   return {
     status,
     source: calendarUrl,
+    sessionHoursSource: robinhoodHoursUrl,
     sourceCheckedAt: new Date(cache?.fetchedAt ?? Date.now()).toISOString(),
     timezone: 'America/New_York',
     localDate: eastern.date,
     localTime: `${String(eastern.hour).padStart(2, '0')}:${String(eastern.minute).padStart(2, '0')}`,
+    session,
+    regularSession: session === 'regular',
     earlyCloseMinute: dateRecord?.kind === 'early_close' ? closeMinute : null,
     holidayName: dateRecord?.kind === 'closed' ? 'Nasdaq-published market holiday' : null,
     extendedHolidayWeekend: status === 'closed' && isThreeDayHolidayWeekend(eastern.date, holidays),
     detail: status === 'open'
-      ? 'Nasdaq calendar and regular-session hours classify the current Eastern Time session as open.'
-      : 'Nasdaq calendar and regular-session hours classify the current Eastern Time session as closed.',
+      ? `Nasdaq holiday calendar and Robinhood session hours classify the current Eastern Time session as ${session.replace('_', ' ')}.`
+      : weekend
+        ? 'The Robinhood-supported 24/5 session is closed for the current Eastern Time weekend period.'
+        : dateRecord?.kind === 'closed'
+          ? 'Nasdaq publishes this date as a market holiday; the planner treats it as closed.'
+          : 'The Robinhood-supported equity session is currently between trading sessions.',
   }
 }

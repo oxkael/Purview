@@ -4,6 +4,7 @@ import { getLongbowMarketStatus } from './longbow.js'
 import { getLongbowOracleStatus } from './oracle.js'
 import { getBlueBundlesStatus } from './morphoBundles.js'
 import { getChainLivenessStatus } from './chainLiveness.js'
+import { getRobinhoodNvdaRegistryStatus } from './robinhoodStockToken.js'
 
 const client = createPublicClient({
   chain: robinhoodMainnet,
@@ -147,6 +148,8 @@ export async function getIntegrationStatus() {
     ? await getChainLivenessStatus()
     : { status: 'blocked' as const, detail: 'Primary RPC chain was not verified; independent liveness could not be checked.' }
 
+  const robinhoodNvdaRegistry = await getRobinhoodNvdaRegistryStatus()
+
   const [usdg, nvda, morphoBlue, morphoBlueBundlesV1, adaptiveCurveIrm] = contractProbes
 
   return {
@@ -176,6 +179,7 @@ export async function getIntegrationStatus() {
       morphoBlueBundlesV1: morphoBundles,
       chainlink: longbowOracle,
       nvdaTokenOracle,
+      robinhoodStockToken: robinhoodNvdaRegistry,
       chainLiveness,
       uniswapV3: {
         status: 'configured' as const,
