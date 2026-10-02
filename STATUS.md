@@ -94,7 +94,7 @@ Receipt
 - [x] "/api/portfolio?address=..." — live read verified for the supplied wallet on Robinhood Chain; see portfolio evidence below
 - [~] "POST /api/intent" — deterministic parser and Fastify route pass in-process tests; no live deployment check or AI provider integration
 - [~] "POST /api/plan" — a live blocked preflight response was demonstrated; SELL/BORROW/HYBRID candidate calculation and ranking are wired, but a live feasible candidate has not been validated; execution remains disabled
-- [ ] "/api/plan/:id/recheck"
+- [~] "POST /api/plan/recheck" — HMAC plan-reference validation and fresh planner recheck are implemented; no planner-selected local-fork `eth_call` has succeeded end to end yet
 - [ ] "/api/execute"
 - [ ] "/api/execution/:id"
 
@@ -111,6 +111,14 @@ Receipt
 - [ ] Parser cannot directly execute transactions
 - [ ] Parser cannot override constraints
 - [ ] Invalid parser output rejected
+
+- Backend validation note (2026-10-01): `npm.cmd test` passed 32 tests; `GET /api/runtime` reported the configured local-fork host and `transactionSubmission: disabled`. A temporary frontend scaffold was removed after reaffirming the backend-first build order; frontend work remains not started.
+
+### 2026-10-01: Local-fork RPC isolation
+
+- Fixed the Uniswap quote client so it does not fall back from a loopback Anvil RPC to the separately configured live liveness RPC. Fork quotes now fail closed on fork RPC errors instead of potentially combining fork and live-chain state.
+- Centralized loopback RPC detection for runtime status and local simulation gating. Added tests covering localhost, IPv4/IPv6 loopback, remote hosts, malformed URLs, and lookalike hostnames.
+- `npm.cmd test` passed: 32 tests, 0 failures. This fixes RPC-source isolation; it does not make the public RPC archive-capable or demonstrate a successful planner-selected simulation.
 
 ---
 
@@ -828,3 +836,46 @@ The fresh quotes show the 0.05% tier remains best at each usable size. Widening 
 - Recorded the latest evidence accurately: 11 local router tests and 2 borrow-policy tests passed; latest fork run had 6 passes and 2 fresh BORROW/HYBRID success tests skipped because the live oracle was stale. No production transaction was sent.
 - Flagged unresolved feed-decimal validation, provisional oracle-age policy, off-chain signer/session/jurisdiction boundary, immutable constructor configuration, and missing gated backend signing flow for independent review.
 - Documentation-only change. No tests, on-chain calls, signing, or deployment were performed.
+
+### 2026-09-30: Persistent local fork deployment and read-only router simulation
+
+- Started Anvil 1.8.3 as a hidden long-running process on `127.0.0.1:8545`, forking Robinhood Chain mainnet state and setting local chain ID 4663. The node writes periodic state snapshots under the system temp directory; it is not a public-chain deployment.
+- Deployed the current `PurviewRouter` artifact to the local fork at `0x9a9edea6c804f40d81b1dc4ae551affbad2ec5bb` (local tx `0x97a4fd86218ec20f1563204346a6e1f2a081bd8abc65d794e00551135e981926`, block 76801983). The artifact's Solidity source metadata hash matched the current `PurviewRouter.sol`; runtime code is present at the local address.
+- Impersonated the supplied wallet only in Anvil, funded it with local ETH for gas, and called Morpho `setAuthorization(router, true)`. Local tx `0x9383a9084a536e4d7a2892c392431b8bdc028910177fed88fa99eb151fd01540` succeeded at block 76801984; `isAuthorized(wallet, router)` returned true. No transaction was broadcast to mainnet.
+- Updated ignored `backend/.env` to use the local Anvil RPC and router address, retain the independent public RPC for liveness, and configure Anvil account #1 as the local-only execution signer. `GET /api/execution/readiness` reported chain 4663, deployed bytecode, and signer match; it correctly remains blocked by jurisdiction and never claims executable.
+- Added a local-only recheck simulation path. It is enabled only by an explicit flag and loopback RPC; it obtains the router digest, signs only for the read-only call, encodes one of the fixed router methods, and runs `eth_call` at the unchanged local head. It returns only call status/results, not calldata/signature, and submits no transaction. Corrected the signer helper to raw-sign the already EIP-191-prefixed router digest; the old `signMessage` behavior would have applied the prefix twice and failed router recovery.
+- `npm.cmd run build` passed. Tests were not run. A diagnostic direct `eth_call` reached the deployed SELL method and reverted with `ERC20InsufficientAllowance` for the new router (0 allowance; 0.01 NVDA requested). The supplied wallet has no current eligible plan, so this is not a successful planner-derived simulation. The initial fork returned an upstream historical-state error and was replaced by a fresh fork; the refreshed fork exposed the same provider limitation on different uncached storage slots.
+- Follow-up: the backend `/api/portfolio` request against the refreshed fork returned 503 because the upstream RPC could not provide an unqueried Morpho/NVDA storage proof at the fork state root; even a latest-tag probe for that slot failed. The persistent fork itself, router code, and authorization remain available. Full planner-derived recheck simulation needs an archive-capable Robinhood Chain fork RPC; the backend continues to fail closed until configured.
+- Deployment/review blockers were re-scoped: dedicated production signer and independent security review remain blockers for a public mainnet deployment only. For this isolated local fork, a disposable known Anvil signer is used and no independent review is required to continue local eth_call experiments. Jurisdiction remains blocked for any real execution; no public-chain router or authorization exists.
+
+### 2026-10-01: Pin recheck simulation to the plan snapshot
+
+- Changed `POST /api/plan/recheck` to build the router call template and deadline from the exact block recorded in the freshly recomputed plan snapshot. It no longer derives them from a separately sampled latest block; missing or malformed snapshot evidence leaves the template unavailable.
+- Pinned local simulation reads (router bytecode, immutable signer, execution digest, and router `eth_call`) to that same block. It still verifies the local fork head has not moved around the call and returns no transaction signature or calldata.
+- `npm.cmd run build` passed. Tests were not run. This closes a state-mixing gap but does not resolve the fork RPC's historical-proof limitation, provide a feasible candidate, unblock jurisdiction, or add transaction submission/receipt verification.
+
+### 2026-10-01: Fresh fork diagnosis and deployment blocker
+
+- Preserved the existing local fork at `127.0.0.1:8545` and its deployed router. Started a separate disposable fork at port `8546` from the public Robinhood RPC at block `77450571` (chain ID 4663). On that fresh fork, pinned Morpho market reads and `/api/portfolio`-equivalent reads succeeded, confirming the old 8545 fork snapshot was the source of the original historical-state error.
+- Attempted a router deployment only on the new local fork. The deployment transaction was never mined; Anvil could not mine because its upstream RPC lacked a historical state proof for an account needed while constructing the block. Dropped the pending local transaction, confirmed the pool was empty, and stopped the disposable 8546 fork. No public transaction was sent and no files in the existing 8545 fork were changed.
+- The running backend on port 3001 is stale relative to source: `/api/health` responds, but the newly added `/api/runtime` route returns 404. It was not restarted because there is not yet a router deployment on the fresh fork to configure it against.
+- To complete the fresh-fork deployment, provide a Robinhood Chain 4663 archive-capable RPC endpoint in the ignored local environment, then restart Anvil at a recent block, deploy and authorize locally, update the local backend RPC/router settings, and restart the backend. Current required evidence is still missing; do not report deployment or end-to-end simulation as complete.
+
+### 2026-10-02: Archive RPC, fresh local router deployment, and backend restart
+
+- Configured the user's Alchemy Robinhood Chain endpoint in ignored `backend/.env` as `ANVIL_FORK_SOURCE_RPC_URL`. Verified chain ID 4663 and successfully read the Morpho market at a recent historical block (latest 78520210, read block 78520178). The endpoint key was shared in chat; rotate it in Alchemy after this session and replace the ignored local value.
+- Kept the existing Anvil fork on `127.0.0.1:8545` untouched. Started a separate fork on `127.0.0.1:8546` from the archive endpoint at block 78521493.
+- Deployed `PurviewRouter` locally at `0x19cc4dd8d86fc525f8cf37c51612de91b1e52038`. Local deployment tx `0x25ad48e5c51b10b225ac8a6883ff7d4d689238515ae535a7dccb12b4fd7f945f`, block 78521494, receipt status 1, runtime code 12,941 bytes.
+- Impersonated the supplied wallet only inside Anvil and called Morpho `setAuthorization(router, true)`. Local tx `0x62e6a10e52e9798e98174e2994f045193acb38e1d8319ea05a3bdea912264f34`, block 78521495, receipt status 1. `isAuthorized(wallet, router)` returned true. This is local fork state, not a public transaction.
+- Updated only ignored local backend settings to RPC `http://127.0.0.1:8546`, the new router address, and local-fork simulation enabled. Restarted backend on port 3001. `/api/runtime` reports `local-fork`; `/api/execution/readiness` verifies chain 4663, router bytecode, and signer match. It remains `executable: false` because jurisdiction is blocked.
+- Verified `/api/portfolio` succeeds at block 78521495 and returns actual zero NVDA and zero USDG balances for the supplied wallet. A real `POST /api/plan` for USDG 3,000 with max NVDA sale 20% returned `no_candidates_to_evaluate`: no wallet NVDA, no NVDA collateral, and active session status unknown. Therefore no planner-selected route exists to simulate, and no successful planner-derived router simulation or actual execution is claimed.
+- `npm.cmd test` passed after the backend restart (32/32). Backend execution submission and receipt verification endpoints remain unimplemented; frontend/model work remains out of scope until backend is complete.
+- Restarted the backend with outbound access for configured read-only integrations. Nasdaq session lookup now reports the current Robinhood extended session as open; independent RPC liveness initially failed because the fork head was idle. Enabled Anvil one-second interval mining on port 8546, after which liveness passed (local head age 3s, remote head age 10s, timestamp skew 7s at 2026-10-02 20:51 UTC). This only advances local empty blocks; it does not update forked oracle state.
+- Rechecked the plan after session/liveness recovery. It remains `no_candidates_to_evaluate`, blocked by jurisdiction, provisional oracle age 13,448s versus 3,660s allowed, zero wallet NVDA/collateral, and no permitted sale amount. No plan recheck simulation was possible because no candidate exists.
+
+### 2026-10-02: Live plan recheck after backend handoff
+
+- Re-ran `POST /api/plan` against the running local-fork backend for the supplied wallet and the actual USDG 3,000 / max NVDA sale 20% request. This was a live request; no balances, prices, quotes, or plan candidates were injected.
+- Confirmed current session is Robinhood extended and the official Robinhood asset registry reports NVDA tradable in market, extended, and overnight sessions. Uniswap returned a live quote, but the wallet has no NVDA available to size a sale.
+- The plan remains blocked with four material blockers: `JURISDICTION_UNVERIFIED`; `ORACLE_FRESHNESS_UNVERIFIED` (round age 14,036s versus the provisional 3,660s active-session bound); `NO_NVDA_COLLATERAL` (zero wallet NVDA and zero Longbow NVDA collateral); and `SELL_ROUTE_UNAVAILABLE` (no wallet NVDA to quote). No candidate or plan reference was issued; therefore recheck simulation, execution, and receipt verification cannot honestly be demonstrated yet.
+- No backend code or local-chain state was changed for this check. Execution submission and receipt verification remain unimplemented. The next valid path to a planner-derived simulation needs a usable wallet position, an oracle round within the approved freshness bound, and approved jurisdiction access. Do not weaken these gates or substitute local test balances as evidence for the user's real wallet.

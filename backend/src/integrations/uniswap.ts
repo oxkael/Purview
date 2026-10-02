@@ -1,8 +1,12 @@
 import { createPublicClient, encodeFunctionData, fallback, formatUnits, http, type Address } from 'viem'
-import { configuredContracts, longbowNvdaUsdgFeed, livenessRpcUrl, mainnetRpcUrl, robinhoodMainnet, serverConfig, uniswapReferenceToleranceBps, uniswapV3 } from '../config.js'
+import { configuredContracts, isLoopbackRpcUrl, longbowNvdaUsdgFeed, livenessRpcUrl, mainnetRpcUrl, robinhoodMainnet, serverConfig, uniswapReferenceToleranceBps, uniswapV3 } from '../config.js'
 import { findMinimumExactInputForOutput } from '../quoteSizing.js'
 
-const quoteRpcUrls = [...new Set([mainnetRpcUrl, livenessRpcUrl].filter(Boolean))]
+// Never fall back from a local fork to live chain state: that would mix two
+// different snapshots and could create a plausible but invalid quote.
+const quoteRpcUrls = isLoopbackRpcUrl(mainnetRpcUrl)
+  ? [mainnetRpcUrl]
+  : [...new Set([mainnetRpcUrl, livenessRpcUrl].filter(Boolean))]
 const client = createPublicClient({
   chain: robinhoodMainnet,
   transport: quoteRpcUrls.length > 1

@@ -4,6 +4,15 @@ import { defineChain, getAddress } from 'viem'
 export const mainnetRpcUrl = process.env.ROBINHOOD_RPC_URL ?? 'https://rpc.mainnet.chain.robinhood.com'
 export const livenessRpcUrl = process.env.ROBINHOOD_LIVENESS_RPC_URL?.trim() ?? ''
 
+export function isLoopbackRpcUrl(rawUrl: string): boolean {
+  try {
+    const hostname = new URL(rawUrl).hostname.toLowerCase().replace(/^\[|\]$/g, '')
+    return hostname === 'localhost' || hostname === '::1' || /^127(?:\.\d{1,3}){3}$/.test(hostname)
+  } catch {
+    return false
+  }
+}
+
 export const robinhoodMainnet = defineChain({
   id: 4663,
   name: 'Robinhood Chain',

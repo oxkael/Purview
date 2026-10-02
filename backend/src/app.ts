@@ -9,8 +9,10 @@ import { getReadOnlyPlanPreflight } from './planner.js'
 import type { StructuredIntent } from './intent.js'
 import { getMinimumUniswapNvdaInputForUsdg, getUniswapNvdaToUsdgQuotes } from './integrations/uniswap.js'
 import { hashPlanCandidate, issuePlanReference, PlanReferenceError, verifyPlanReference } from './planReference.js'
-import { mainnetRpcUrl, robinhoodMainnet } from './config.js'
+import { isLoopbackRpcUrl, mainnetRpcUrl, robinhoodMainnet } from './config.js'
 import { buildExecutionCallTemplate } from './executionCallTemplate.js'
+import { simulateLocalForkRouterCall } from './executionSimulation.js'
+import { getJurisdictionGate } from './jurisdiction.js'
 
 const routerReadAbi = [
   { type: 'function', name: 'executionSigner', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
@@ -24,6 +26,20 @@ export function buildApp() {
     service: 'purview-backend',
     scope: 'process-health-only',
   }))
+
+  app.get('/api/runtime', async () => {
+    const rpc = new URL(mainnetRpcUrl)
+    const localFork = isLoopbackRpcUrl(mainnetRpcUrl)
+    return {
+      expectedChainId: 4663,
+      environment: localFork ? 'local-fork' : 'configured-rpc',
+      rpcHost: rpc.host,
+      transactionSubmission: 'disabled',
+      detail: localFork
+        ? 'Backend reads are routed to a loopback RPC. This is a local fork environment; no mainnet transaction is submitted.'
+        : 'Backend reads use the configured remote RPC. The UI does not submit transactions.',
+    }
+  })
 
   app.post<{ Body: { text?: unknown } }>('/api/intent', async (request, reply) => {
     const text = request.body?.text
@@ -138,11 +154,18 @@ export function buildApp() {
         })
       }
       let callTemplate: { status: 'template_only'; method: string; arguments: unknown; route: unknown } | { status: 'unavailable'; detail: string }
+      let recheckBlockNumber: bigint | undefined
       try {
-        const block = await createPublicClient({
+        const snapshot = (preflight as { snapshot?: { blockNumber?: unknown } }).snapshot
+        if (typeof snapshot?.blockNumber !== 'string' || !/^\d+$/.test(snapshot.blockNumber)) {
+          throw new Error('The refreshed plan did not include a valid pinned snapshot block.')
+        }
+        recheckBlockNumber = BigInt(snapshot.blockNumber)
+        const client = createPublicClient({
           chain: robinhoodMainnet,
           transport: http(mainnetRpcUrl, { timeout: 5_000, retryCount: 0 }),
-        }).getBlock({ blockTag: 'latest' })
+        })
+        const block = await client.getBlock({ blockNumber: recheckBlockNumber })
         const freshness = preflight.oracleFreshnessForPlan as { maxAgeSeconds?: number | null } | undefined
         const template = buildExecutionCallTemplate(selected, {
           blockTimestamp: block.timestamp,
@@ -155,6 +178,27 @@ export function buildApp() {
           detail: error instanceof Error ? error.message : 'A fixed router-call template could not be prepared.',
         }
       }
+      let simulation: Record<string, unknown> = {
+        status: 'not_attempted',
+        detail: 'No selected, constraint-passing candidate and recheck block are available to simulate.',
+      }
+      if (callTemplate.status === 'template_only' && recheckBlockNumber !== undefined) {
+        try {
+          simulation = await simulateLocalForkRouterCall({
+            user: reference.address,
+            template: {
+              method: callTemplate.method as 'executeSell' | 'executeBorrow' | 'executeHybrid',
+              arguments: callTemplate.arguments as Record<string, unknown>,
+            },
+            blockNumber: recheckBlockNumber,
+          })
+        } catch (error) {
+          simulation = {
+            status: 'unavailable',
+            detail: error instanceof Error ? error.message : 'The read-only router eth_call could not be completed.',
+          }
+        }
+      }
       return reply.send({
         status: preflight.status,
         executable: false,
@@ -162,11 +206,12 @@ export function buildApp() {
         executionPreparation: {
           status: 'blocked',
           callTemplate,
+          simulation,
           routerAddressConfigured: Boolean(process.env.PURVIEW_ROUTER_ADDRESS?.trim()),
           signerConfigured: Boolean(process.env.PURVIEW_EXECUTION_SIGNER_PRIVATE_KEY?.trim()),
-          jurisdiction: 'blocked',
+          jurisdiction: (preflight as { jurisdictionGate?: { status?: string } }).jurisdictionGate?.status ?? 'blocked',
           blockers: (preflight as { blockers?: unknown[] }).blockers ?? [],
-          detail: 'This fixed-method template is derived from the freshly rechecked candidate. It contains no calldata or signature; jurisdiction is blocked, and this endpoint cannot sign, simulate, or submit.',
+          detail: 'The fixed-method template comes from the freshly rechecked candidate. Local-fork simulation may create an ephemeral signature solely for eth_call; it returns no signature or calldata and submits no transaction. The dev-only jurisdiction override, if active, does not enable transaction submission.',
         },
         refreshedPlan: preflight,
       })
@@ -194,7 +239,7 @@ export function buildApp() {
         ? { status: /^0x[0-9a-fA-F]{40}$/.test(rawRouterAddress) ? 'configured' : 'invalid', address: /^0x[0-9a-fA-F]{40}$/.test(rawRouterAddress) ? getAddress(rawRouterAddress) : undefined }
         : { status: 'not_configured', detail: 'PURVIEW_ROUTER_ADDRESS is not set.' },
       signerKey: rawSignerKey ? { status: 'configured' } : { status: 'not_configured', detail: 'PURVIEW_EXECUTION_SIGNER_PRIVATE_KEY is not set.' },
-      jurisdiction: { status: 'blocked', detail: 'Jurisdiction eligibility is intentionally blocked until an approved policy and trusted access check are configured.' },
+      jurisdiction: getJurisdictionGate(),
       signing: { status: 'disabled', detail: 'This endpoint is read-only. It does not sign authorizations or submit transactions.' },
     }
 

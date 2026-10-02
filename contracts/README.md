@@ -10,20 +10,23 @@ provisional product policy and depend on the backend signer attesting the correc
 checks the Chainlink round, `oraclePaused()`, and oracle deviation; borrow actions enforce the 60%-of-live-LLTV
 cap.
 
-The backend has an isolated execution-digest signing helper and a read-only router readiness diagnostic; the
-signer is not connected to an execution route or configured. It must sign only after the approved market
-session, jurisdiction, liveness, quote, and plan gates pass. For the 72/96-hour SELL windows to be accepted,
+The backend has a local-fork-only execution-digest signer and `eth_call` simulation path, plus a read-only
+router readiness diagnostic. The current deployment and signer exist only on a persistent local Anvil fork;
+they are not safe for a public network. Production signing must wait for the approved market session,
+jurisdiction, liveness, quote, and plan gates. For the 72/96-hour SELL windows to be accepted,
 the constructor's maximum oracle age must be set to 96 hours; BORROW and HYBRID remain fixed at 3,660 seconds.
 The caller must separately approve
 NVDA spending to this router and authorize it on Morpho. These tests use mocks and do not prove behavior
 against deployed Robinhood Chain contracts. Read-only mainnet-fork simulations of SELL, BORROW, and HYBRID
-passed, but they use local-fork NVDA injection and simulated Morpho authorization. The router has not been
-audited or deployed, and ordinary-wallet transfer/authorization behavior is not established. Do not use it
-with funds or deploy it.
+passed, but they use local-fork NVDA injection and simulated Morpho authorization. The persistent fork also
+has a local-only router deployment and a local Morpho authorization transaction from the impersonated supplied
+wallet. A direct diagnostic eth_call reverted on missing NVDA allowance; no successful planner-derived backend
+simulation is established. The router has not been independently audited and has not been deployed publicly.
+Do not use it with real funds or deploy it publicly.
 
 The current constructor inputs and pre-deployment blockers are recorded in [DEPLOYMENT.md](DEPLOYMENT.md).
-The signer address is intentionally unresolved, and that file is preparation only; it does not authorize or
-perform deployment.
+The local Anvil signer is disposable and publicly known. The production signer remains unresolved; local
+deployment evidence and public-chain deployment remain separate.
 
 ## Local commands
 

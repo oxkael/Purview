@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { verifyMessage } from 'viem'
+import { recoverAddress } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { ExecutionSignerError, signExecutionDigest } from '../dist/executionSigner.js'
 
@@ -11,11 +11,7 @@ const digest = `0x${'12'.repeat(32)}`
 test('signs a 32-byte router digest only with the configured router signer', async () => {
   const signed = await signExecutionDigest(digest, testAccount.address, testPrivateKey)
   assert.equal(signed.signer, testAccount.address)
-  assert.equal(await verifyMessage({
-    address: testAccount.address,
-    message: { raw: digest },
-    signature: signed.signature,
-  }), true)
+  assert.equal(await recoverAddress({ hash: digest, signature: signed.signature }), testAccount.address)
 })
 
 test('refuses to sign when no dedicated execution key is configured', async () => {

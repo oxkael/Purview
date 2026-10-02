@@ -18,9 +18,11 @@ const privateKeyPattern = /^0x[0-9a-fA-F]{64}$/
 const bytes32Pattern = /^0x[0-9a-fA-F]{64}$/
 
 /**
- * Sign only a digest returned by the deployed router's executionDigest view.
- * This helper is intentionally not exposed through an HTTP route. Its caller must
- * have already passed every deterministic execution gate and simulation.
+ * Sign only the final 32-byte digest returned by the deployed router's
+ * executionDigest view. The router already applies the EIP-191 prefix before
+ * returning this digest, so sign its hash directly; signMessage would prefix it twice.
+ * This is not an execution-signing endpoint. Its current caller is the loopback-only
+ * fork eth_call path, which discards the signature and submits no transaction.
  */
 export async function signExecutionDigest(
   digest: string,
@@ -50,6 +52,6 @@ export async function signExecutionDigest(
     )
   }
 
-  const signature = await account.signMessage({ message: { raw: digest as Hex } })
+  const signature = await account.sign({ hash: digest as Hex })
   return { signer: account.address, signature }
 }

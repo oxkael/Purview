@@ -7,7 +7,8 @@
 - Solidity target: `contracts/src/PurviewRouter.sol` and `contracts/src/PurviewBorrowPolicy.sol`.
 - Intended network: Robinhood Chain, chain ID `4663`.
 - Intended route types: fixed-path NVDA-to-USDG SELL; Morpho USDG BORROW against NVDA collateral; and HYBRID swap/supply/borrow.
-- The router has not been deployed. No router address or execution signer has been configured. No live transaction has been broadcast.
+- A router is deployed only on the persistent local Anvil fork recorded in `contracts/DEPLOYMENT.md`. No router is deployed on Robinhood mainnet or testnet, and no public-chain transaction has been broadcast.
+- Local fork simulation uses Anvil's publicly known test signer. It is not a production signer and must never be used on a public network.
 - Review the router, its dependencies/interfaces, deployment configuration, authorization design, oracle assumptions, and the backend signer boundary. The backend signer is not yet connected to a complete gated execution flow.
 
 ## Intended security properties
@@ -27,6 +28,8 @@ Evidence below is user-reported command output; the current agent did not rerun 
 - User reported `forge build` succeeded with no warnings after the final lint annotations.
 - User reported the local Foundry suite passed: 11/11 `PurviewRouterTest` tests and 2/2 `PurviewBorrowPolicyTest` tests. These use local mocks and establish only the behaviors covered by those tests.
 - User reported Robinhood Chain fork tests passed for live market/token/feed/pool constructor checks and SELL execution in a local fork. The test harness injects NVDA and does not broadcast a transaction.
+- On 2026-09-30, a persistent local Anvil fork was started, the router was deployed there, and the supplied wallet was impersonated locally to call Morpho `setAuthorization`. The receipt succeeded and `isAuthorized(wallet, router)` returned true. These are local-only state changes; details and hashes are in `contracts/DEPLOYMENT.md`.
+- The backend TypeScript build passed after adding a loopback-only, read-only router simulation path. A direct local `eth_call` using a diagnostic 0.01 NVDA SELL template reached the deployed router and reverted on the missing NVDA allowance to the router. This was not a planner-selected plan or a successful execution simulation; the wallet currently has no allowance and no NVDA balance.
 - In the latest state-aware fork run, 6 tests passed and 2 successful-route tests were skipped because the live oracle was stale. The explicit stale BORROW/HYBRID rejection tests passed. Therefore fresh-feed live-fork BORROW/HYBRID success is **not currently demonstrated**.
 - Earlier fork test output showed live Morpho and SwapRouter02 routes succeeding under a test harness with injected NVDA and local Morpho authorization. This is historical point-in-time fork evidence, not proof of a fresh current feed, ordinary wallet permissions, backend signing, deployment, or production execution.
 
@@ -42,16 +45,17 @@ The reviewer should independently validate these before deployment; none is waiv
 6. **Token and protocol behavior:** verify NVDA/USDG token transfer behavior, decimals, pause semantics, allowances, fee-on-transfer/rebasing assumptions, Morpho market accounting and share rounding, Uniswap Router02 behavior, pool allowlist, and atomic rollback on the actual deployed versions.
 7. **Risk-model boundaries:** validate the operational LTV arithmetic and rounding, its reliance on Morpho's oracle for collateral value, the 2% oracle cross-check, price scaling, borrow-share-to-assets rounding, and behavior when values approach integer bounds.
 8. **Test coverage:** add/review adversarial tests for malformed feed return data, unexpected feed decimals, malformed `oraclePaused()` responses, timestamp boundaries, authorization replay/expiry/wrong signer, pool changes, token callbacks, rounding extremes, and each execution route's failure rollback. Re-run current unit, fork, and static-analysis commands against the reviewed commit.
-9. **Backend readiness:** `/api/plan/recheck` currently returns a parameter template, not signed calldata, simulation, or submission. The backend execution readiness remains blocked by absent deployment/signer and jurisdiction policy. Do not interpret the router's fork tests as end-to-end backend execution evidence.
+9. **Backend readiness:** `/api/plan/recheck` now has a loopback-only local-fork `eth_call` path, but current planner portfolio reads fail on unavailable historical storage proofs from the public fork RPC, and the supplied wallet has no feasible candidate. The direct diagnostic call only demonstrated the expected missing-allowance revert. The backend remains blocked for real execution by jurisdiction and incomplete production signing gates. Do not interpret the local diagnostic call as a successful plan simulation.
 
 ## Deployment blockers (current)
 
-- No independent security review has been completed.
-- No execution signer address has been selected; no signer secret should be put in source control or chat.
+- No independent security review has been completed. This remains a public mainnet deployment blocker, not a local-fork blocker.
+- No production execution signer has been selected. The Anvil signer is disposable, publicly known, and valid only for the local fork.
 - The proposed constructor maximum of 96 hours and associated SELL policy need confirmation.
 - Jurisdiction eligibility remains intentionally blocked in the backend.
-- The signing service is not yet wired to verified plan rechecks and all required risk/session/access gates.
-- No router deployment address, deployed-code verification, or production readiness check exists.
+- The production signing service is not yet wired to verified plan rechecks and all required risk/session/access gates. The local-fork eth_call signer does not satisfy this production requirement.
+- The current public fork RPC cannot provide some required historical storage proofs, so complete planner/recheck simulation is not yet validated on this persistent fork. An archive-capable upstream RPC is needed; the backend must continue failing closed until those reads succeed.
+- No public-chain router deployment address or production readiness check exists. The local deployment is recorded separately and does not imply production readiness.
 - Current successful fresh-oracle fork execution of BORROW/HYBRID is not established by the latest run.
 
 ## Reviewer conclusion

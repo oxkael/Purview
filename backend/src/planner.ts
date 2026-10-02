@@ -5,6 +5,7 @@ import { getPortfolio } from './integrations/portfolio.js'
 import { getMinimumHybridNvdaSaleQuotes, getMinimumUniswapNvdaInputForUsdg, getUniswapNvdaToUsdgQuotes } from './integrations/uniswap.js'
 import { getNasdaqMarketSessionStatus } from './integrations/nasdaqCalendar.js'
 import { serverConfig } from './config.js'
+import { getJurisdictionGate } from './jurisdiction.js'
 import { calculateSwapExecutionCost, generateCandidates, maxPermittedSaleRaw, selectPlans, type SellQuoteOption } from './plannerMath.js'
 
 type Blocker = { code: string; detail: string }
@@ -78,19 +79,16 @@ export async function getReadOnlyPlanPreflight(address: Address, intent: Structu
   const borrowBlockers: Blocker[] = []
   const sellBlockers: Blocker[] = []
 
-  const jurisdictionGate = {
-    status: 'blocked' as const,
-    enforced: true as const,
-    detail: 'No approved jurisdiction policy or trusted location-verification source is configured. All plans remain blocked until eligibility can be checked.',
-    disclaimer: 'Product availability and use may be restricted by your jurisdiction. This plan does not determine your legal eligibility; do not use the service where it is prohibited.',
-  }
+  const jurisdictionGate = getJurisdictionGate()
   const jurisdictionBlocker = {
     code: 'JURISDICTION_UNVERIFIED',
     detail: jurisdictionGate.detail,
   }
-  blockers.push(jurisdictionBlocker)
-  borrowBlockers.push(jurisdictionBlocker)
-  sellBlockers.push(jurisdictionBlocker)
+  if (jurisdictionGate.status === 'blocked') {
+    blockers.push(jurisdictionBlocker)
+    borrowBlockers.push(jurisdictionBlocker)
+    sellBlockers.push(jurisdictionBlocker)
+  }
 
   const stockTokenRegistry = integrationStatus.integrations.robinhoodStockToken
   if (stockTokenRegistry.status !== 'available') {
